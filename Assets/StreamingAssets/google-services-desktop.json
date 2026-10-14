@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "938559150857",
+    "project_id": "bmuarr-92f19",
+    "storage_bucket": "bmuarr-92f19.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:938559150857:android:a975ba6a85f0765e9911d8",
+        "android_client_info": {
+          "package_name": "com.bmu.bmuarr"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "938559150857-njl8b4o69s1g6sgvotkjt4fk2kre65tg.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.bmu.bmuarr",
+            "certificate_hash": "b9d4f764b6d18c1bd290e938471ccb52856c75dd"
+          }
+        },
+        {
+          "client_id": "938559150857-ho60lta4321a48v6pt3ff4p7n82a5f3r.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCE11RCKU8uUqh36mfvfpYyQzpHsxmIHVY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "938559150857-ho60lta4321a48v6pt3ff4p7n82a5f3r.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
