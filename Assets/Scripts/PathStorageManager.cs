@@ -1,137 +1,126 @@
+using System;
 using System.IO;
 using UnityEngine;
 
 /// <summary>
-/// Static utility to save, load, and check paths recorded for campus destinations.
-/// Persists data as JSON files in Application.persistentDataPath and backs up to PlayerPrefs.
+/// Saves and loads recorded routes as JSON files in Application.persistentDataPath.
+/// Writes are atomic (temp file + replace), so a crash mid-save never corrupts a route.
 /// </summary>
 public static class PathStorageManager
 {
-    private const string FOLDER_NAME = "CampusPaths";
-    private const string PREFS_PREFIX = "BMU_PATH_";
+    private const string Tag = "PathStorage";
+    private const string FolderName = "CampusPaths";
+    private const string LegacyPrefsPrefix = "BMU_PATH_";
 
-    private static string GetDirectoryPath()
+    private static string DirectoryPath
     {
-        string dir = Path.Combine(Application.persistentDataPath, FOLDER_NAME);
-        if (!Directory.Exists(dir))
+        get
         {
-            Directory.CreateDirectory(dir);
+            string dir = Path.Combine(Application.persistentDataPath, FolderName);
+            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+            return dir;
         }
-        return dir;
     }
 
     private static string GetFilePath(string destinationName)
     {
-        string safeName = SanitizeFileName(destinationName);
-        return Path.Combine(GetDirectoryPath(), safeName + ".json");
+        return Path.Combine(DirectoryPath, SanitizeFileName(destinationName) + ".json");
     }
 
     private static string SanitizeFileName(string name)
     {
-        string invalid = new string(Path.GetInvalidFileNameChars()) + new string(Path.GetInvalidPathChars());
-        foreach (char c in invalid)
+        foreach (char c in Path.GetInvalidFileNameChars())
         {
             name = name.Replace(c.ToString(), "");
         }
-        return name.Trim().Replace(" ", "_");
+        return name.Trim().Replace(" ", "_").ToLowerInvariant();
     }
 
-    /// <summary>
-    /// Checks if a recorded path already exists for this destination.
-    /// </summary>
+    /// <summary>True when a route compatible with this app version exists.</summary>
     public static bool HasPath(string destinationName)
     {
-        if (string.IsNullOrEmpty(destinationName)) return false;
-
-        string path = GetFilePath(destinationName);
-        if (File.Exists(path)) return true;
-
-        return PlayerPrefs.HasKey(PREFS_PREFIX + SanitizeFileName(destinationName));
+        return LoadPath(destinationName) != null;
     }
 
-    /// <summary>
-    /// Saves the given path data to disk and PlayerPrefs.
-    /// </summary>
-    public static void SavePath(PathData pathData)
-    {
-        if (pathData == null || string.IsNullOrEmpty(pathData.destinationName)) return;
-
-        string json = pathData.ToJson();
-        string safeName = SanitizeFileName(pathData.destinationName);
-
-        try
-        {
-            string filePath = GetFilePath(pathData.destinationName);
-            File.WriteAllText(filePath, json);
-            Debug.Log($"PathStorageManager: Saved path for '{pathData.destinationName}' to {filePath}");
-        }
-        catch (System.Exception e)
-        {
-            Debug.LogWarning($"PathStorageManager: Could not write file: {e.Message}");
-        }
-
-        // Backup in PlayerPrefs
-        PlayerPrefs.SetString(PREFS_PREFIX + safeName, json);
-        PlayerPrefs.Save();
-    }
-
-    /// <summary>
-    /// Loads the path data for a given destination. Returns null if not found.
-    /// </summary>
+    /// <summary>Returns the saved route, or null if none exists or it is from an incompatible version.</summary>
     public static PathData LoadPath(string destinationName)
     {
         if (string.IsNullOrEmpty(destinationName)) return null;
 
-        string safeName = SanitizeFileName(destinationName);
         string filePath = GetFilePath(destinationName);
+        if (!File.Exists(filePath)) return null;
 
-        // Try reading from file first
-        if (File.Exists(filePath))
+        try
         {
-            try
+            PathData data = PathData.FromJson(File.ReadAllText(filePath));
+            if (data == null || !data.IsValid)
             {
-                string json = File.ReadAllText(filePath);
-                return PathData.FromJson(json);
+                AppLog.Warn(Tag, $"Route for '{destinationName}' is from an older app version or damaged; it must be recorded again.");
+                return null;
             }
-            catch (System.Exception e)
-            {
-                Debug.LogWarning($"PathStorageManager: Failed to read file {filePath}: {e.Message}");
-            }
+            return data;
         }
-
-        // Fallback to PlayerPrefs
-        string key = PREFS_PREFIX + safeName;
-        if (PlayerPrefs.HasKey(key))
+        catch (Exception e)
         {
-            string json = PlayerPrefs.GetString(key);
-            return PathData.FromJson(json);
+            AppLog.Warn(Tag, $"Could not read route for '{destinationName}': {e.Message}");
+            return null;
         }
-
-        return null;
     }
 
-    /// <summary>
-    /// Deletes a recorded path for a destination.
-    /// </summary>
+    /// <returns>True when the route was written to disk.</returns>
+    public static bool SavePath(PathData pathData)
+    {
+        if (pathData == null || !pathData.IsValid)
+        {
+            AppLog.Warn(Tag, "Refusing to save an invalid route.");
+            return false;
+        }
+
+        string filePath = GetFilePath(pathData.destinationName);
+        string tempPath = filePath + ".tmp";
+
+        try
+        {
+            File.WriteAllText(tempPath, pathData.ToJson());
+            if (File.Exists(filePath)) File.Delete(filePath);
+            File.Move(tempPath, filePath);
+
+            RemoveLegacyCopy(pathData.destinationName);
+            AppLog.Info(Tag, $"Saved route '{pathData.destinationName}' ({pathData.totalDistanceMeters:F1} m, {pathData.points.Count} points).");
+            return true;
+        }
+        catch (Exception e)
+        {
+            AppLog.Error(Tag, $"Could not save route '{pathData.destinationName}': {e.Message}");
+            try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { /* best effort */ }
+            return false;
+        }
+    }
+
     public static void DeletePath(string destinationName)
     {
         if (string.IsNullOrEmpty(destinationName)) return;
 
-        string safeName = SanitizeFileName(destinationName);
-        string filePath = GetFilePath(destinationName);
-
-        if (File.Exists(filePath))
+        try
         {
-            try { File.Delete(filePath); } catch { }
+            string filePath = GetFilePath(destinationName);
+            if (File.Exists(filePath)) File.Delete(filePath);
         }
-
-        string key = PREFS_PREFIX + safeName;
-        if (PlayerPrefs.HasKey(key))
+        catch (Exception e)
         {
-            PlayerPrefs.DeleteKey(key);
+            AppLog.Warn(Tag, $"Could not delete route '{destinationName}': {e.Message}");
+        }
+        RemoveLegacyCopy(destinationName);
+    }
+
+    /// <summary>Version 1 also kept a PlayerPrefs copy; clear it so it cannot shadow new data.</summary>
+    private static void RemoveLegacyCopy(string destinationName)
+    {
+        string legacyKey = LegacyPrefsPrefix + destinationName.Trim().Replace(" ", "_");
+        if (PlayerPrefs.HasKey(legacyKey))
+        {
+            PlayerPrefs.DeleteKey(legacyKey);
             PlayerPrefs.Save();
         }
-
-        Debug.Log($"PathStorageManager: Deleted path for '{destinationName}'.");
     }
 }

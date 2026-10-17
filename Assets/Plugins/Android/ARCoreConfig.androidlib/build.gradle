@@ -1,0 +1,11 @@
+apply plugin: 'com.android.library'
+
+// Manifest-only module: declares ARCore as required for the app.
+// Vuforia adds the ARCore library (com.google.ar:core) itself but not this
+// manifest entry, and without it ARCore will not start a session, so Vuforia
+// falls back to its own, less stable tracking (VISION_ONLY).
+android {
+    namespace 'com.bmu.arcoreconfig'
+    compileSdkVersion 34
+    buildToolsVersion '34.0.0'
+}

@@ -57,3 +57,19 @@ desktop.ini
 
 # Vuforia local cache
 /QCAR/
+
+# Unity crash-recovery scenes
+/[Aa]ssets/_Recovery/
+/[Aa]ssets/_Recovery.meta
+
+# Generated during builds (Vuforia license class holds the license key; never commit it)
+/[Aa]ssets/VuforiaLicense.cs
+/[Aa]ssets/VuforiaLicense.cs.meta
+/[Aa]ssets/Resources/alpha.shader
+/[Aa]ssets/Resources/alpha.shader.meta
+/[Aa]ssets/Resources/PerformanceTestRun*.json
+/[Aa]ssets/Resources/PerformanceTestRun*.json.meta
+
+# Signing keys must never be in the repo
+*.keystore
+*.jks

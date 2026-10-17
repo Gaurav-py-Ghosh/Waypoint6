@@ -1,919 +1,1025 @@
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using TMPro;
 using UnityEditor;
+using UnityEditor.Build.Reporting;
 using UnityEditor.Events;
 using UnityEditor.SceneManagement;
 using UnityEngine;
-using UnityEngine.UI;
 using UnityEngine.EventSystems;
 using UnityEngine.InputSystem.UI;
-using TMPro;
+using UnityEngine.SceneManagement;
+using UnityEngine.UI;
 using Vuforia;
 using Image = UnityEngine.UI.Image;
 using Object = UnityEngine.Object;
 
+/// <summary>
+/// Editor tools for BMUARR.
+///
+/// "Build Production Scenes" sets up the two-scene app:
+///   MainMenu.unity   – splash, login, destination list. No AR camera.
+///   Navigation.unity – Vuforia AR camera, marker, ground plane, route HUD.
+/// It is safe to run again: generated objects are rebuilt, Vuforia objects are kept.
+/// </summary>
 public static class BMUARRSetup
 {
-    [MenuItem("Tools/BMU AR/Auto-Setup Vuforia & Navigation Scene")]
-    public static void SetupScene()
+    private const string LegacyScenePath = "Assets/Scenes/SampleScene.unity";
+    private const string MenuScenePath = "Assets/Scenes/MainMenu.unity";
+    private const string NavigationScenePath = "Assets/Scenes/Navigation.unity";
+    private const string MaterialsFolder = "Assets/Materials";
+    private const string RouteMaterialPath = MaterialsFolder + "/RouteRibbon.mat";
+    private const string MarkerMaterialPath = MaterialsFolder + "/RouteMarker.mat";
+    private const string GeneratedUIFolder = "Assets/UI/Generated";
+    private const string ArrowSpritePath = GeneratedUIFolder + "/NavArrow.png";
+    private const string TargetImagePath = "Assets/UI/ImageTargets/Image_target.jpeg";
+    private const string FontPath = "Assets/TextMesh Pro/Resources/Fonts & Materials/LiberationSans SDF.asset";
+    private const float MarkerWidthMeters = 0.2f;
+
+    private const int UILayer = 5;
+
+    private static readonly Color PanelColor = new Color(0.06f, 0.08f, 0.12f, 0.94f);
+    private static readonly Color CardColor = new Color(0.09f, 0.12f, 0.20f, 0.98f);
+    private static readonly Color PrimaryColor = new Color(0.15f, 0.75f, 0.42f);
+    private static readonly Color SecondaryColor = new Color(0.30f, 0.33f, 0.42f);
+    private static readonly Color DangerColor = new Color(0.80f, 0.25f, 0.25f);
+    private static readonly Color AccentColor = new Color(0.20f, 1f, 0.55f);
+    private static readonly Color BannerColor = new Color(0.62f, 0.42f, 0.05f, 0.96f);
+    private static readonly Color AccentFinishColor = new Color(0.12f, 0.55f, 0.95f);
+
+    // ───────────────────────── Scene setup ─────────────────────────
+
+    [MenuItem("Tools/BMU AR/Build Production Scenes")]
+    public static void BuildProductionScenes()
     {
-        Undo.IncrementCurrentGroup();
-        Undo.SetCurrentGroupName("Setup BMU AR Vuforia Scene");
-        int undoGroup = Undo.GetCurrentGroup();
-
-        Debug.Log("BMU AR: Starting automated Vuforia & Scene Setup...");
-
-        if (EditorSceneManager.GetActiveScene().path != "Assets/Scenes/SampleScene.unity")
+        for (int i = 0; i < SceneManager.sceneCount; i++)
         {
-            EditorSceneManager.OpenScene("Assets/Scenes/SampleScene.unity");
-            Debug.Log("BMU AR: Opened 'Assets/Scenes/SampleScene.unity'.");
+            if (SceneManager.GetSceneAt(i).isDirty)
+            {
+                Debug.LogError("BMU AR: Save or discard your open scene changes first, then run this again.");
+                return;
+            }
         }
 
-        // 1. Deactivate conflicting AR Foundation objects
-        GameObject arSession = GameObject.Find("AR Session");
-        if (arSession != null)
+        string menuPath = EnsureMenuSceneAsset();
+        if (menuPath == null) return;
+
+        Material routeMaterial = EnsureMaterial(RouteMaterialPath, transparent: true, doubleSided: true);
+        Material markerMaterial = EnsureMaterial(MarkerMaterialPath, transparent: false, doubleSided: false);
+        Sprite arrowSprite = EnsureArrowSprite();
+
+        Scene menu = EditorSceneManager.OpenScene(menuPath, OpenSceneMode.Single);
+        bool navExists = File.Exists(NavigationScenePath);
+        Scene nav = navExists
+            ? EditorSceneManager.OpenScene(NavigationScenePath, OpenSceneMode.Additive)
+            : EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Additive);
+
+        MoveVuforiaObjects(menu, nav);
+
+        SceneManager.SetActiveScene(nav);
+        BuildNavigationScene(nav, routeMaterial, markerMaterial, arrowSprite);
+
+        SceneManager.SetActiveScene(menu);
+        BuildMenuScene(menu);
+
+        EditorSceneManager.MarkSceneDirty(nav);
+        EditorSceneManager.MarkSceneDirty(menu);
+        bool savedNav = EditorSceneManager.SaveScene(nav, NavigationScenePath);
+        bool savedMenu = EditorSceneManager.SaveScene(menu, menuPath);
+        EditorSceneManager.CloseScene(nav, true);
+
+        EditorBuildSettings.scenes = new[]
         {
-            Undo.RecordObject(arSession, "Deactivate AR Session");
-            arSession.SetActive(false);
-            Debug.Log("BMU AR: Deactivated 'AR Session' to prevent camera conflict.");
+            new EditorBuildSettingsScene(menuPath, true),
+            new EditorBuildSettingsScene(NavigationScenePath, true)
+        };
+
+        ConfigureScreenAndUI();
+        AssetDatabase.SaveAssets();
+
+        if (savedNav && savedMenu) Debug.Log("BMU AR: Production scenes built and saved (MainMenu + Navigation).");
+        else Debug.LogError("BMU AR: Scenes were built but saving failed. Check the Console.");
+    }
+
+    /// <summary>Renames the old SampleScene to MainMenu (keeps its GUID and references).</summary>
+    private static string EnsureMenuSceneAsset()
+    {
+        if (File.Exists(MenuScenePath)) return MenuScenePath;
+
+        if (!File.Exists(LegacyScenePath))
+        {
+            Debug.LogError($"BMU AR: Neither '{MenuScenePath}' nor '{LegacyScenePath}' exists.");
+            return null;
         }
 
-        GameObject xrOrigin = GameObject.Find("XR Origin (AR Rig)");
-        if (xrOrigin != null)
+        string error = AssetDatabase.MoveAsset(LegacyScenePath, MenuScenePath);
+        if (!string.IsNullOrEmpty(error))
         {
-            Undo.RecordObject(xrOrigin, "Deactivate XR Origin");
-            xrOrigin.SetActive(false);
-            Debug.Log("BMU AR: Deactivated 'XR Origin (AR Rig)' to prevent camera conflict.");
+            Debug.LogError("BMU AR: Could not rename SampleScene: " + error);
+            return null;
+        }
+        Debug.Log("BMU AR: Renamed SampleScene.unity to MainMenu.unity.");
+        return MenuScenePath;
+    }
+
+    /// <summary>Moves the AR camera and marker out of the menu scene, so the camera only runs in Navigation.</summary>
+    private static void MoveVuforiaObjects(Scene menu, Scene nav)
+    {
+        foreach (VuforiaBehaviour cam in FindInScene<VuforiaBehaviour>(menu))
+        {
+            GameObject root = cam.transform.root.gameObject;
+            if (FindInScene<VuforiaBehaviour>(nav).Count == 0)
+            {
+                SceneManager.MoveGameObjectToScene(root, nav);
+                Debug.Log("BMU AR: Moved AR Camera to Navigation scene.");
+            }
+            else
+            {
+                Object.DestroyImmediate(root);
+            }
         }
 
-        // 2. Setup Vuforia ARCamera
-        VuforiaBehaviour vuforiaCam = Object.FindFirstObjectByType<VuforiaBehaviour>();
-        GameObject arCameraGO = null;
-        if (vuforiaCam == null)
+        foreach (ImageTargetBehaviour target in FindInScene<ImageTargetBehaviour>(menu))
+        {
+            GameObject root = target.transform.root.gameObject;
+            if (FindInScene<ImageTargetBehaviour>(nav).Count == 0)
+            {
+                SceneManager.MoveGameObjectToScene(root, nav);
+                Debug.Log("BMU AR: Moved marker '" + root.name + "' to Navigation scene.");
+            }
+            else
+            {
+                Object.DestroyImmediate(root);
+            }
+        }
+    }
+
+    private static void BuildNavigationScene(Scene nav, Material routeMaterial, Material markerMaterial, Sprite arrowSprite)
+    {
+        // Remove what an earlier run generated.
+        foreach (string name in new[] { "NavigationSystems", "NavigationCanvas", "EventSystem", "Calibrated_World_Origin", "WaypointManager" })
+        {
+            foreach (GameObject go in FindByName(nav, name)) Object.DestroyImmediate(go);
+        }
+
+        // AR Camera
+        VuforiaBehaviour vuforia = FindInScene<VuforiaBehaviour>(nav).FirstOrDefault();
+        if (vuforia == null)
         {
             EditorApplication.ExecuteMenuItem("GameObject/Vuforia Engine/AR Camera");
-            vuforiaCam = Object.FindFirstObjectByType<VuforiaBehaviour>();
-            if (vuforiaCam != null)
-            {
-                arCameraGO = vuforiaCam.gameObject;
-                Debug.Log("BMU AR: Created Vuforia ARCamera.");
-            }
+            vuforia = FindInScene<VuforiaBehaviour>(nav).FirstOrDefault();
         }
-        else
+        if (vuforia == null)
         {
-            arCameraGO = vuforiaCam.gameObject;
-            Debug.Log("BMU AR: Found existing Vuforia ARCamera.");
+            Debug.LogError("BMU AR: Could not create the Vuforia AR Camera.");
+            return;
         }
+        GameObject arCamera = vuforia.gameObject;
+        arCamera.tag = "MainCamera";
+        RemoveMissingScripts(arCamera);
 
-        if (arCameraGO != null)
+        // NavigationSceneController shows its own error dialog; avoid a second popup.
+        foreach (MonoBehaviour mb in arCamera.GetComponents<MonoBehaviour>())
         {
-            arCameraGO.tag = "MainCamera";
-            VuforiaCameraManager vcm = arCameraGO.GetComponent<VuforiaCameraManager>();
-            if (vcm != null) Undo.DestroyObjectImmediate(vcm);
+            if (mb != null && mb.GetType().Name == "DefaultInitializationErrorHandler") Object.DestroyImmediate(mb);
         }
 
-        // 3. Setup Image Target with Image_target.jpeg
-        string targetImagePath = "Assets/UI/ImageTargets/Image_target.jpeg";
-        Texture2D targetTexture = AssetDatabase.LoadAssetAtPath<Texture2D>(targetImagePath);
-        if (targetTexture == null)
+        // Marker
+        ImageTargetBehaviour target = FindInScene<ImageTargetBehaviour>(nav).FirstOrDefault() ?? CreateImageTarget(nav);
+        if (target == null)
         {
-            Debug.LogError($"BMU AR: Could not load target image at '{targetImagePath}'.");
+            Debug.LogError("BMU AR: Could not create the image target.");
+            return;
         }
+        GameObject targetGO = target.gameObject;
+        RemoveMissingScripts(targetGO);
+        AnchorTracker anchorTracker = GetOrAdd<AnchorTracker>(targetGO);
+        SetSerialized(anchorTracker, "targetObserver", target);
+        SetSerialized(anchorTracker, "physicalAnchor", targetGO.transform);
+        ReportMarkerSize(target);
 
-        GameObject imageTargetGO = GameObject.Find("ImageTarget_Compass");
-        ImageTargetBehaviour itb = null;
+        // Ground plane, used for floor height when the marker is on a wall.
+        PlaneFinderBehaviour planeFinder = EnsurePlaneFinder(nav);
 
-        if (imageTargetGO == null)
+        // Systems
+        var systems = new GameObject("NavigationSystems");
+        var floor = systems.AddComponent<FloorEstimator>();
+        SetSerialized(floor, "anchorTracker", anchorTracker);
+        SetSerialized(floor, "planeFinder", planeFinder);
+
+        var tracking = systems.AddComponent<TrackingQualityMonitor>();
+        SetSerialized(tracking, "anchorTracker", anchorTracker);
+
+        var renderer = systems.AddComponent<ARPathRenderer>();
+        renderer.anchorTracker = anchorTracker;
+        renderer.routeMaterial = routeMaterial;
+        renderer.markerMaterial = markerMaterial;
+
+        var recorder = systems.AddComponent<ARPathRecorder>();
+        recorder.arCamera = arCamera.transform;
+        recorder.anchorTracker = anchorTracker;
+        recorder.pathRenderer = renderer;
+        recorder.floorEstimator = floor;
+        recorder.trackingMonitor = tracking;
+
+        var guidance = systems.AddComponent<GuidanceController>();
+        guidance.arCamera = arCamera.transform;
+        guidance.anchorTracker = anchorTracker;
+        guidance.pathRenderer = renderer;
+        guidance.floorEstimator = floor;
+
+        var controller = systems.AddComponent<NavigationSceneController>();
+        controller.anchorTracker = anchorTracker;
+        controller.recorder = recorder;
+        controller.guidance = guidance;
+        controller.trackingMonitor = tracking;
+        controller.pathRenderer = renderer;
+
+        // UI
+        CreateEventSystem();
+        Transform safeArea = CreateCanvas("NavigationCanvas", sortingOrder: 10);
+        controller.hud = BuildNavigationHUD(safeArea, arrowSprite);
+        CreateNotifier(safeArea);
+    }
+
+    private static void BuildMenuScene(Scene menu)
+    {
+        foreach (string name in new[] { "AR Session", "XR Origin (AR Rig)", "WaypointManager", "Calibrated_World_Origin", "RecordingHUD", "GuidanceHUD", "NotifierArea" })
         {
-            EditorApplication.ExecuteMenuItem("GameObject/Vuforia Engine/Image Target");
-            itb = Object.FindFirstObjectByType<ImageTargetBehaviour>();
-            if (itb != null)
-            {
-                imageTargetGO = itb.gameObject;
-                imageTargetGO.name = "ImageTarget_Compass";
-                Debug.Log("BMU AR: Created 'ImageTarget_Compass' GameObject.");
-            }
+            foreach (GameObject go in FindByName(menu, name)) Object.DestroyImmediate(go);
         }
-        else
+        RemoveMissingPrefabInstances(menu);
+        foreach (GameObject root in menu.GetRootGameObjects()) RemoveMissingScripts(root);
+
+        // A plain camera: the menu never starts the AR camera.
+        if (FindInScene<Camera>(menu).Count == 0)
         {
-            itb = imageTargetGO.GetComponent<ImageTargetBehaviour>();
+            var camGO = new GameObject("MenuCamera", typeof(Camera), typeof(AudioListener));
+            camGO.tag = "MainCamera";
+            var cam = camGO.GetComponent<Camera>();
+            cam.clearFlags = CameraClearFlags.SolidColor;
+            cam.backgroundColor = new Color(0.04f, 0.05f, 0.08f);
+            cam.cullingMask = 0;
         }
 
-        if (imageTargetGO == null)
-        {
-            imageTargetGO = new GameObject("ImageTarget_Compass");
-            itb = imageTargetGO.AddComponent<ImageTargetBehaviour>();
-        }
-
-        // Configure ImageTargetBehaviour properly for FromImage runtime tracking
-        if (itb != null && targetTexture != null)
-        {
-            SerializedObject soTarget = new SerializedObject(itb);
-            soTarget.Update();
-
-            var runtimeTexProp = soTarget.FindProperty("mRuntimeTexture");
-            var widthProp = soTarget.FindProperty("mWidth");
-            var heightProp = soTarget.FindProperty("mHeight");
-            var typeProp = soTarget.FindProperty("mImageTargetType");
-            var trackableNameProp = soTarget.FindProperty("mTrackableName");
-            var aspectProp = soTarget.FindProperty("mAspectRatio");
-            var dataSetPathProp = soTarget.FindProperty("mDataSetPath");
-
-            if (runtimeTexProp != null) runtimeTexProp.objectReferenceValue = targetTexture;
-            if (widthProp != null) widthProp.floatValue = 0.2f;
-            if (heightProp != null) heightProp.floatValue = 0.2f;
-            if (typeProp != null) typeProp.intValue = 3; // 3 = FromImage!
-            if (trackableNameProp != null) trackableNameProp.stringValue = "Image_target";
-            if (aspectProp != null) aspectProp.floatValue = 1.0f;
-            if (dataSetPathProp != null) dataSetPathProp.stringValue = "";
-
-            soTarget.ApplyModifiedProperties();
-            Debug.Log("BMU AR: Configured ImageTarget_Compass with 'FromImage' mode and target texture.");
-        }
-
-        // Configure DefaultObserverEventHandler
-        DefaultObserverEventHandler observerHandler = imageTargetGO.GetComponent<DefaultObserverEventHandler>();
-        if (observerHandler == null)
-        {
-            observerHandler = imageTargetGO.AddComponent<DefaultObserverEventHandler>();
-        }
-        observerHandler.StatusFilter = DefaultObserverEventHandler.TrackingStatusFilter.Tracked_ExtendedTracked_Limited;
-
-        // 4. Setup AnchorTracker on ImageTarget_Compass and WaypointManager at root
-        imageTargetGO.transform.SetParent(null, true);
-        imageTargetGO.transform.position = Vector3.zero;
-        imageTargetGO.transform.rotation = Quaternion.identity;
-        imageTargetGO.transform.localScale = Vector3.one;
-        SetLayerRecursively(imageTargetGO, 0);
-
-        AnchorTracker anchorTracker = imageTargetGO.GetComponent<AnchorTracker>();
-        if (anchorTracker == null)
-        {
-            anchorTracker = Undo.AddComponent<AnchorTracker>(imageTargetGO);
-        }
-
-        // Clean any old ARPathRenderer / ARPathRecorder off ImageTarget_Compass
-        ARPathRenderer oldPR = imageTargetGO.GetComponent<ARPathRenderer>();
-        if (oldPR != null) Object.DestroyImmediate(oldPR, true);
-
-        ARPathRecorder oldRec = imageTargetGO.GetComponent<ARPathRecorder>();
-        if (oldRec != null) Object.DestroyImmediate(oldRec, true);
-
-        // Independent WaypointManager root GameObject (matches waypoint architecture)
-        GameObject managerObj = GameObject.Find("WaypointManager");
-        if (managerObj == null)
-        {
-            managerObj = new GameObject("WaypointManager");
-        }
-        managerObj.transform.SetParent(null, true);
-        managerObj.transform.position = Vector3.zero;
-        managerObj.transform.rotation = Quaternion.identity;
-
-        ARPathRenderer pathRenderer = managerObj.GetComponent<ARPathRenderer>();
-        if (pathRenderer == null)
-        {
-            pathRenderer = managerObj.AddComponent<ARPathRenderer>();
-        }
-        pathRenderer.worldAnchorRoot = anchorTracker.StabilizedOrigin;
-
-        ARPathRecorder pathRecorder = managerObj.GetComponent<ARPathRecorder>();
-        if (pathRecorder == null)
-        {
-            pathRecorder = managerObj.AddComponent<ARPathRecorder>();
-        }
-        pathRecorder.anchorTracker = anchorTracker;
-        if (arCameraGO != null) pathRecorder.arCamera = arCameraGO.transform;
-        pathRecorder.pathRenderer = pathRenderer;
-        Debug.Log("BMU AR: Configured WaypointManager with ARPathRenderer and ARPathRecorder.");
-
-        VuforiaImageTargetHandler handler = imageTargetGO.GetComponent<VuforiaImageTargetHandler>();
-        if (handler == null)
-        {
-            handler = Undo.AddComponent<VuforiaImageTargetHandler>(imageTargetGO);
-        }
-
-        Transform contentRoot = imageTargetGO.transform.Find("ARContentRoot");
-        if (contentRoot == null)
-        {
-            GameObject rootGO = new GameObject("ARContentRoot");
-            rootGO.transform.SetParent(imageTargetGO.transform, false);
-            rootGO.transform.localPosition = Vector3.zero;
-            contentRoot = rootGO.transform;
-            Undo.RegisterCreatedObjectUndo(rootGO, "Create ARContentRoot");
-        }
-        contentRoot.gameObject.SetActive(true);
-
-        // Clean up any old ARDirectionArrow geometry if present
-        ARDirectionArrow oldArrow = contentRoot.GetComponent<ARDirectionArrow>();
-        if (oldArrow != null) Undo.DestroyObjectImmediate(oldArrow);
-
-        Transform oldArrowGeom = contentRoot.Find("DirectionArrow");
-        if (oldArrowGeom != null) Undo.DestroyObjectImmediate(oldArrowGeom.gameObject);
-
-        // Add subtle flat floor ring on compass target
-        Transform ringT = contentRoot.Find("FloorCompassRing");
-        if (ringT == null)
-        {
-            GameObject ringGO = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-            ringGO.name = "FloorCompassRing";
-            ringGO.transform.SetParent(contentRoot, false);
-            ringGO.transform.localPosition = new Vector3(0, 0.002f, 0);
-            ringGO.transform.localScale = new Vector3(0.24f, 0.001f, 0.24f);
-            Collider col = ringGO.GetComponent<Collider>();
-            if (col != null) Undo.DestroyObjectImmediate(col);
-
-            Shader unlitShader = Shader.Find("Universal Render Pipeline/Unlit");
-            if (unlitShader == null) unlitShader = Shader.Find("Unlit/Color");
-            if (unlitShader == null) unlitShader = Shader.Find("Standard");
-            Material ringMat = new Material(unlitShader);
-            ringMat.color = new Color(0.15f, 0.85f, 0.45f, 0.7f);
-            ringGO.GetComponent<Renderer>().sharedMaterial = ringMat;
-            Undo.RegisterCreatedObjectUndo(ringGO, "Create FloorCompassRing");
-        }
-        handler.arContentRoot = contentRoot.gameObject;
-
-        // 5. Setup Canvas & UI Hierarchy
-        GameObject canvasGO = GameObject.Find("Canvas");
+        GameObject canvasGO = FindByName(menu, "Canvas").FirstOrDefault();
         if (canvasGO == null)
         {
-            Debug.LogError("BMU AR: Could not find 'Canvas' in the scene.");
+            Debug.LogError("BMU AR: No 'Canvas' in the menu scene.");
             return;
         }
 
-        Canvas canvas = canvasGO.GetComponent<Canvas>();
-        if (canvas != null)
-        {
-            SerializedObject soCanvas = new SerializedObject(canvas);
-            soCanvas.Update();
-            var propRenderMode = soCanvas.FindProperty("m_RenderMode");
-            var propCamera = soCanvas.FindProperty("m_Camera");
-            var propPlaneDistance = soCanvas.FindProperty("m_PlaneDistance");
-            var propSortingOrder = soCanvas.FindProperty("m_SortingOrder");
-
-            if (propRenderMode != null) propRenderMode.intValue = 1; // 1 = ScreenSpaceCamera
-            if (propCamera != null && arCameraGO != null) propCamera.objectReferenceValue = arCameraGO.GetComponent<Camera>();
-            if (propPlaneDistance != null) propPlaneDistance.floatValue = 0.5f;
-            if (propSortingOrder != null) propSortingOrder.intValue = 100;
-            soCanvas.ApplyModifiedProperties();
-            EditorUtility.SetDirty(canvas);
-        }
-
-        CanvasScaler scaler = canvasGO.GetComponent<CanvasScaler>();
-        if (scaler != null)
-        {
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(1080, 1920);
-            scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
-            scaler.matchWidthOrHeight = 0.5f;
-            EditorUtility.SetDirty(scaler);
-        }
-
-        CampusNavigationManager navMgr = canvasGO.GetComponent<CampusNavigationManager>();
-        if (navMgr == null)
-        {
-            navMgr = Undo.AddComponent<CampusNavigationManager>(canvasGO);
-        }
+        var canvas = canvasGO.GetComponent<Canvas>();
+        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+        canvas.worldCamera = null;
+        canvas.sortingOrder = 0;
+        ConfigureScaler(canvasGO.GetComponent<CanvasScaler>());
 
         Transform tCanvas = canvasGO.transform;
+        var navMgr = GetOrAdd<CampusNavigationManager>(canvasGO);
         Transform tMain = tCanvas.Find("Main_Panel");
         Transform tDest = tCanvas.Find("DestinationPanel");
-
-        // Deactivate old unused panels
-        Transform tOldAR1 = tCanvas.Find("ARScreenPanel");
-        if (tOldAR1 != null) tOldAR1.gameObject.SetActive(false);
-        Transform tOldAR2 = tCanvas.Find("DestARScreenPanel");
-        if (tOldAR2 != null) tOldAR2.gameObject.SetActive(false);
-        Transform tOldQR = tCanvas.Find("QRScanningPanel");
-        if (tOldQR != null) tOldQR.gameObject.SetActive(false);
-        Transform tOldQRMain = tCanvas.Find("QRMainPanel");
-        if (tOldQRMain != null) tOldQRMain.gameObject.SetActive(false);
-
-        // Ensure clean onboarding flow: Splash active, others inactive on launch
-        Transform tSplash = tCanvas.Find("Splash_Screen");
-        Transform tLogin = tCanvas.Find("Login_Screen_Panel");
-        Transform tMail = tCanvas.Find("Mail_Verification_Panel");
-        if (tSplash != null) tSplash.gameObject.SetActive(true);
-        if (tLogin != null) tLogin.gameObject.SetActive(false);
-        if (tMail != null) tMail.gameObject.SetActive(false);
-        if (tMain != null) tMain.gameObject.SetActive(false);
-        if (tDest != null) tDest.gameObject.SetActive(false);
-
-        // Build or Get LocationPromptModal
-        LocationPromptModal modal = SetupLocationPromptModal(tCanvas);
-        navMgr.locationPromptModal = modal;
-
-        // Build or Get RecordingHUD
-        GameObject recHUD = SetupRecordingHUD(tCanvas, navMgr);
-        navMgr.recordingHUD = recHUD;
-
-        // Build or Get GuidanceHUD
-        GameObject guideHUD = SetupGuidanceHUD(tCanvas, navMgr);
-        navMgr.guidanceHUD = guideHUD;
-
-        // Link Managers
         if (tMain != null) navMgr.mainPanel = tMain.gameObject;
         if (tDest != null) navMgr.destinationPanel = tDest.gameObject;
-        navMgr.anchorTracker = anchorTracker;
-        navMgr.pathRecorder = pathRecorder;
-        navMgr.pathRenderer = pathRenderer;
-        navMgr.imageTargetHandler = handler;
-        if (handler != null) handler.navigationManager = navMgr;
 
-        // Wire Destination Buttons
-        if (tDest != null)
+        var modal = canvasGO.GetComponentInChildren<LocationPromptModal>(true);
+        if (modal != null)
         {
-            WireDestinationButton(tDest, "Library_Button", navMgr, "Library");
-            WireDestinationButton(tDest, "Reception_Button", navMgr, "Reception");
-            WireDestinationButton(tDest, "Program_Office_Button", navMgr, "Program Office");
-            WireDestinationButton(tDest, "DCafe_Button", navMgr, "D Cafe");
-            WireDestinationButton(tDest, "GA_Button", navMgr, "Grand Auditorium");
-
-            Transform backBtn = tDest.Find("Back");
-            if (backBtn != null)
+            navMgr.locationPromptModal = modal;
+            if (modal.messageText != null)
             {
-                Button btn = backBtn.GetComponent<Button>();
-                if (btn != null)
-                {
-                    while (btn.onClick.GetPersistentEventCount() > 0)
-                    {
-                        UnityEventTools.RemovePersistentListener(btn.onClick, 0);
-                    }
-                    UnityEventTools.AddVoidPersistentListener(btn.onClick, navMgr.ShowMainPanel);
-                }
+                modal.messageText.enableAutoSizing = true;
+                modal.messageText.fontSizeMin = 14;
+                modal.messageText.fontSizeMax = 22;
             }
         }
 
-        // Wire Main Panel Buttons
-        if (tMain != null)
+        // Legacy QR / AR panels are unused; keep them hidden.
+        foreach (string legacy in new[] { "QRMainPanel", "QRScanningPanel", "ARScreenPanel", "DestARScreenPanel" })
         {
-            Transform selectDestBtn = tMain.Find("SelectDestination_Button");
-            if (selectDestBtn != null)
-            {
-                Button btn = selectDestBtn.GetComponent<Button>();
-                if (btn != null)
-                {
-                    while (btn.onClick.GetPersistentEventCount() > 0)
-                    {
-                        UnityEventTools.RemovePersistentListener(btn.onClick, 0);
-                    }
-                    UnityEventTools.AddVoidPersistentListener(btn.onClick, navMgr.ShowDestinationPanel);
-                }
-            }
-
-            Transform exploreBtn = tMain.Find("Explore_Button");
-            if (exploreBtn != null)
-            {
-                Button btn = exploreBtn.GetComponent<Button>();
-                if (btn != null)
-                {
-                    while (btn.onClick.GetPersistentEventCount() > 0)
-                    {
-                        UnityEventTools.RemovePersistentListener(btn.onClick, 0);
-                    }
-                    UnityEventTools.AddVoidPersistentListener(btn.onClick, navMgr.ShowDestinationPanel);
-                }
-            }
+            Transform t = tCanvas.Find(legacy);
+            if (t != null) t.gameObject.SetActive(false);
         }
 
-        // Connect UIManager
-        GameObject uiMgrGO = GameObject.Find("Ui Manager");
-        if (uiMgrGO != null)
+        GameObject uiManagerGO = FindByName(menu, "Ui Manager").FirstOrDefault();
+        if (uiManagerGO != null)
         {
-            UIManager uiMgr = uiMgrGO.GetComponent<UIManager>();
-            if (uiMgr != null)
+            var uiManager = uiManagerGO.GetComponent<UIManager>();
+            var auth = uiManagerGO.GetComponent<GoogleAuthManager>();
+            if (uiManager != null)
             {
-                if (tSplash != null) uiMgr.splashScreen = tSplash.gameObject;
-                if (tLogin != null) uiMgr.loginScreen = tLogin.gameObject;
-                if (tMail != null) uiMgr.mailVerify = tMail.gameObject;
-                uiMgr.campusNavigationManager = navMgr;
+                uiManager.campusNavigationManager = navMgr;
+                uiManager.googleAuthManager = auth;
             }
+
+            GameObject googleButton = FindByName(menu, "Continue with Google").FirstOrDefault();
+            if (auth != null && googleButton != null) auth.signInButton = googleButton.GetComponent<Button>();
+        }
+        else
+        {
+            Debug.LogWarning("BMU AR: 'Ui Manager' not found. The Google sign-in bridge sends results to that object name.");
         }
 
-        // Auto-wire skipLoginButton on Login_Screen_Panel
-        if (tLogin != null)
-        {
-            LoginScreen loginComp = tLogin.GetComponentInChildren<LoginScreen>();
-            if (loginComp != null)
-            {
-                Transform skipBtnT = tLogin.Find("SkipLogin (1)");
-                if (skipBtnT == null) skipBtnT = tLogin.Find("SkipButton");
-                if (skipBtnT != null)
-                {
-                    loginComp.skipLoginButton = skipBtnT.GetComponent<Button>();
-                }
-            }
-        }
+        // Banner on top of everything in the menu canvas.
+        var notifierRoot = new GameObject("NotifierArea", typeof(RectTransform), typeof(SafeAreaFitter));
+        notifierRoot.layer = UILayer;
+        notifierRoot.transform.SetParent(tCanvas, false);
+        Stretch(notifierRoot.GetComponent<RectTransform>());
+        notifierRoot.transform.SetAsLastSibling();
+        CreateNotifier(notifierRoot.transform);
 
-        // 6. Setup EventSystem & Input System UI Module
-        ConfigureEventSystemAndInput();
-
-        // 7. Configure Portrait Orientation & Screen Scaling
-        ConfigureScreenAndUI();
-
-        Undo.CollapseUndoOperations(undoGroup);
-        EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
-        EditorSceneManager.SaveScene(EditorSceneManager.GetActiveScene());
-        EditorSceneManager.SaveOpenScenes();
-
-        Debug.Log("BMU AR: Setup complete and scene saved successfully!");
+        CreateEventSystemIfMissing(menu);
     }
 
-    [MenuItem("Tools/BMU AR/Upgrade Plugin Importers (Fix Schema Warnings)")]
-    public static void UpgradePluginImporters()
+    // ───────────────────────── Vuforia helpers ─────────────────────────
+
+    private static ImageTargetBehaviour CreateImageTarget(Scene nav)
     {
-        Debug.Log("BMU AR: Upgrading PluginImporter metadata to Unity 6 format...");
-        string[] searchFolders = new[] { "Assets/Plugins", "Assets/Firebase" };
-        string[] allGuids = AssetDatabase.FindAssets("", searchFolders);
-        int upgradedCount = 0;
-
-        foreach (string guid in allGuids)
+        var texture = AssetDatabase.LoadAssetAtPath<Texture2D>(TargetImagePath);
+        if (texture == null)
         {
-            string path = AssetDatabase.GUIDToAssetPath(guid);
-            if (string.IsNullOrEmpty(path)) continue;
+            Debug.LogError($"BMU AR: Marker image not found at '{TargetImagePath}'.");
+            return null;
+        }
 
-            PluginImporter importer = AssetImporter.GetAtPath(path) as PluginImporter;
-            if (importer != null)
+        EditorApplication.ExecuteMenuItem("GameObject/Vuforia Engine/Image Target");
+        ImageTargetBehaviour itb = FindInScene<ImageTargetBehaviour>(nav).FirstOrDefault();
+        if (itb == null) return null;
+
+        itb.gameObject.name = "ImageTarget_Compass";
+        var so = new SerializedObject(itb);
+        SetProp(so, "mRuntimeTexture", texture);
+        SetProp(so, "mWidth", MarkerWidthMeters);
+        SetProp(so, "mHeight", MarkerWidthMeters * texture.height / Mathf.Max(1, texture.width));
+        SetProp(so, "mImageTargetType", 3); // From image
+        SetProp(so, "mTrackableName", "Image_target");
+        SetProp(so, "mDataSetPath", "");
+        so.ApplyModifiedPropertiesWithoutUndo();
+        return itb;
+    }
+
+    private static void ReportMarkerSize(ImageTargetBehaviour target)
+    {
+        var so = new SerializedObject(target);
+        SerializedProperty width = so.FindProperty("mWidth");
+        if (width != null)
+        {
+            Debug.Log($"BMU AR: Marker width is set to {width.floatValue * 100f:F0} cm. The printed marker must be exactly this wide, or route distances will be scaled wrong.");
+        }
+    }
+
+    private static PlaneFinderBehaviour EnsurePlaneFinder(Scene nav)
+    {
+        PlaneFinderBehaviour planeFinder = FindInScene<PlaneFinderBehaviour>(nav).FirstOrDefault();
+        if (planeFinder == null)
+        {
+            EditorApplication.ExecuteMenuItem("GameObject/Vuforia Engine/Ground Plane/Plane Finder");
+            planeFinder = FindInScene<PlaneFinderBehaviour>(nav).FirstOrDefault();
+        }
+        if (planeFinder == null)
+        {
+            Debug.LogWarning("BMU AR: Could not create a Plane Finder; floor height will be estimated.");
+            return null;
+        }
+
+        // We only want automatic floor hit tests: no tap-to-place content.
+        RemovePersistentListeners(planeFinder.OnInteractiveHitTest);
+        RemovePersistentListeners(planeFinder.OnAutomaticHitTest);
+        foreach (MonoBehaviour mb in planeFinder.GetComponents<MonoBehaviour>())
+        {
+            string typeName = mb.GetType().Name;
+            if (typeName == "ContentPositioningBehaviour" || typeName == "AnchorInputListenerBehaviour")
             {
-                importer.SaveAndReimport();
-                upgradedCount++;
+                Object.DestroyImmediate(mb);
             }
         }
-
-        AssetDatabase.SaveAssets();
-        Debug.Log($"BMU AR: Successfully upgraded and re-saved {upgradedCount} PluginImporters to Unity 6 schema!");
+        // Vuforia needs an indicator object (it throws on start without one), but we
+        // do not want Vuforia's visual: give it an empty one.
+        if (planeFinder.PlaneIndicator == null || planeFinder.PlaneIndicator.name != "FloorIndicator_Hidden")
+        {
+            if (planeFinder.PlaneIndicator != null && planeFinder.PlaneIndicator.transform.IsChildOf(planeFinder.transform))
+            {
+                Object.DestroyImmediate(planeFinder.PlaneIndicator);
+            }
+            var indicator = new GameObject("FloorIndicator_Hidden");
+            indicator.transform.SetParent(planeFinder.transform, false);
+            planeFinder.PlaneIndicator = indicator;
+        }
+        planeFinder.HitTestMode = HitTestMode.AUTOMATIC;
+        planeFinder.gameObject.name = "PlaneFinder_Floor";
+        EditorUtility.SetDirty(planeFinder);
+        return planeFinder;
     }
 
-    [MenuItem("Tools/BMU AR/Fix Inputs & Phone UI Scaling")]
-    public static void FixInputsAndUIScaling()
+    private static void RemovePersistentListeners(UnityEngine.Events.UnityEventBase evt)
     {
-        Undo.IncrementCurrentGroup();
-        Undo.SetCurrentGroupName("Fix Inputs & Phone UI Scaling");
-        int undoGroup = Undo.GetCurrentGroup();
-
-        if (EditorSceneManager.GetActiveScene().path != "Assets/Scenes/SampleScene.unity")
-        {
-            EditorSceneManager.OpenScene("Assets/Scenes/SampleScene.unity");
-        }
-
-        ConfigureEventSystemAndInput();
-        ConfigureScreenAndUI();
-
-        Undo.CollapseUndoOperations(undoGroup);
-        EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
-        EditorSceneManager.SaveScene(EditorSceneManager.GetActiveScene());
-        EditorSceneManager.SaveOpenScenes();
-
-        Debug.Log("BMU AR: Inputs and UI Scaling fixed and saved successfully!");
+        if (evt == null) return;
+        while (evt.GetPersistentEventCount() > 0) UnityEventTools.RemovePersistentListener(evt, 0);
     }
 
-    public static void ConfigureEventSystemAndInput()
+    // ───────────────────────── HUD ─────────────────────────
+
+    private static NavigationHUD BuildNavigationHUD(Transform parent, Sprite arrowSprite)
     {
-        GameObject eventSystemGO = GameObject.Find("EventSystem");
-        if (eventSystemGO == null)
-        {
-            eventSystemGO = new GameObject("EventSystem");
-            Undo.RegisterCreatedObjectUndo(eventSystemGO, "Create EventSystem");
-        }
+        var hudGO = new GameObject("NavigationHUD", typeof(RectTransform));
+        hudGO.layer = UILayer;
+        hudGO.transform.SetParent(parent, false);
+        Stretch(hudGO.GetComponent<RectTransform>());
+        var hud = hudGO.AddComponent<NavigationHUD>();
 
-        // Clean any broken/missing script components (like legacy XRUIInputModule)
-        GameObjectUtility.RemoveMonoBehavioursWithMissingScript(eventSystemGO);
+        // Top bar
+        RectTransform top = CreatePanel("TopBar", hudGO.transform, PanelColor);
+        AnchorTop(top, 0f, 250f);
+        hud.titleText = CreateText("Title", top, "RECORDING", 42, FontStyles.Bold, AccentColor);
+        Place(hud.titleText.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(0, -70), new Vector2(-60, 70));
+        hud.statusText = CreateText("Status", top, "Point the camera at the marker.", 30, FontStyles.Normal, Color.white);
+        Place(hud.statusText.rectTransform, new Vector2(0, 0), new Vector2(1, 1), new Vector2(0, -35), new Vector2(-80, -110));
+        hud.statusText.enableAutoSizing = true;
+        hud.statusText.fontSizeMin = 20;
+        hud.statusText.fontSizeMax = 30;
 
-        var legacyModule = eventSystemGO.GetComponent<StandaloneInputModule>();
-        if (legacyModule != null)
-        {
-            Undo.DestroyObjectImmediate(legacyModule);
-        }
+        // Guidance card
+        RectTransform card = CreatePanel("GuidanceCard", hudGO.transform, CardColor);
+        AnchorTop(card, -270f, 220f, horizontalInset: 40f);
+        hud.guidanceCard = card.gameObject;
+        hud.instructionText = CreateText("Instruction", card, "Continue straight", 50, FontStyles.Bold, Color.white);
+        Place(hud.instructionText.rectTransform, new Vector2(0, 0.4f), new Vector2(1, 1), Vector2.zero, new Vector2(-50, -10));
+        hud.instructionText.enableAutoSizing = true;
+        hud.instructionText.fontSizeMin = 28;
+        hud.instructionText.fontSizeMax = 50;
+        hud.distanceText = CreateText("Distance", card, "0 m left", 34, FontStyles.Normal, AccentColor);
+        Place(hud.distanceText.rectTransform, new Vector2(0, 0), new Vector2(1, 0.4f), Vector2.zero, new Vector2(-50, 0));
 
-        var es = eventSystemGO.GetComponent<EventSystem>();
-        if (es == null)
-        {
-            es = Undo.AddComponent<EventSystem>(eventSystemGO);
-        }
-        es.sendNavigationEvents = true;
+        // Direction arrow
+        var arrowRoot = new GameObject("DirectionArrow", typeof(RectTransform));
+        arrowRoot.layer = UILayer;
+        arrowRoot.transform.SetParent(hudGO.transform, false);
+        var arrowRt = arrowRoot.GetComponent<RectTransform>();
+        arrowRt.anchorMin = arrowRt.anchorMax = new Vector2(0.5f, 0.62f);
+        arrowRt.sizeDelta = new Vector2(220, 220);
+        var arrowImage = CreateImage("Arrow", arrowRoot.transform, AccentColor, arrowSprite, sliced: false);
+        Stretch(arrowImage.rectTransform);
+        arrowImage.raycastTarget = false;
+        hud.directionArrow = arrowRt;
 
-        var inputModule = eventSystemGO.GetComponent<InputSystemUIInputModule>();
-        if (inputModule == null)
-        {
-            inputModule = Undo.AddComponent<InputSystemUIInputModule>(eventSystemGO);
-        }
-        inputModule.AssignDefaultActions();
-        EditorUtility.SetDirty(eventSystemGO);
-        Debug.Log("BMU AR: Configured EventSystem with InputSystemUIInputModule and default actions.");
+        // Aiming crosshair (recording): where DROP POINT places a point.
+        TMP_Text crosshair = CreateText("Crosshair", hudGO.transform, "+", 110, FontStyles.Normal, new Color(1f, 1f, 1f, 0.85f));
+        Place(crosshair.rectTransform, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(160, 160));
+        crosshair.outlineWidth = 0.25f;
+        crosshair.outlineColor = new Color32(0, 0, 0, 200);
+        hud.crosshair = crosshair.gameObject;
+
+        // Tracking banner (above the buttons)
+        RectTransform banner = CreatePanel("TrackingBanner", hudGO.transform, BannerColor);
+        AnchorBottom(banner, 450f, 130f, horizontalInset: 40f);
+        hud.trackingBanner = banner.gameObject;
+        hud.trackingBannerText = CreateText("Text", banner, "", 28, FontStyles.Bold, Color.white);
+        Place(hud.trackingBannerText.rectTransform, Vector2.zero, Vector2.one, Vector2.zero, new Vector2(-40, -20));
+        hud.trackingBannerText.enableAutoSizing = true;
+        hud.trackingBannerText.fontSizeMin = 18;
+        hud.trackingBannerText.fontSizeMax = 28;
+
+        // Bottom buttons
+        // Rows from the top: primary (DROP POINT), recording row (UNDO | FINISH), secondary (CANCEL / EXIT).
+        RectTransform bottom = CreatePanel("BottomBar", hudGO.transform, PanelColor);
+        AnchorBottom(bottom, 0f, 430f);
+        Button primary = CreateButton("PrimaryButton", bottom, "+ DROP POINT", PrimaryColor, 38, out hud.primaryButtonText);
+        Place((RectTransform)primary.transform, new Vector2(0.06f, 1), new Vector2(0.94f, 1), new Vector2(0, -85), new Vector2(0, 130));
+        hud.primaryButton = primary;
+
+        var recordingRow = new GameObject("RecordingButtons", typeof(RectTransform));
+        recordingRow.layer = UILayer;
+        recordingRow.transform.SetParent(bottom, false);
+        Place((RectTransform)recordingRow.transform, new Vector2(0.06f, 1), new Vector2(0.94f, 1), new Vector2(0, -220), new Vector2(0, 100));
+        hud.recordingButtons = recordingRow;
+        hud.undoButton = CreateButton("UndoButton", recordingRow.transform, "UNDO", SecondaryColor, 30, out _);
+        Place((RectTransform)hud.undoButton.transform, new Vector2(0f, 0f), new Vector2(0.38f, 1f), Vector2.zero, Vector2.zero);
+        hud.finishButton = CreateButton("FinishButton", recordingRow.transform, "FINISH & SAVE", AccentFinishColor, 30, out _);
+        Place((RectTransform)hud.finishButton.transform, new Vector2(0.42f, 0f), new Vector2(1f, 1f), Vector2.zero, Vector2.zero);
+
+        Button secondary = CreateButton("SecondaryButton", bottom, "CANCEL", SecondaryColor, 30, out hud.secondaryButtonText);
+        Place((RectTransform)secondary.transform, new Vector2(0.06f, 0), new Vector2(0.94f, 0), new Vector2(0, 65), new Vector2(0, 90));
+        hud.secondaryButton = secondary;
+
+        // Dialogs
+        RectTransform confirmCard = CreateDialog("ConfirmPanel", hudGO.transform, 520f, out GameObject confirmPanel);
+        hud.confirmPanel = confirmPanel;
+        hud.confirmText = CreateText("Message", confirmCard, "Are you sure?", 34, FontStyles.Normal, Color.white);
+        Place(hud.confirmText.rectTransform, new Vector2(0, 0.45f), new Vector2(1, 1), Vector2.zero, new Vector2(-80, -60));
+        hud.confirmYesButton = CreateButton("YesButton", confirmCard, "DISCARD", DangerColor, 30, out _);
+        Place((RectTransform)hud.confirmYesButton.transform, new Vector2(0.06f, 0), new Vector2(0.48f, 0), new Vector2(0, 90), new Vector2(0, 110));
+        hud.confirmNoButton = CreateButton("NoButton", confirmCard, "KEEP GOING", SecondaryColor, 30, out _);
+        Place((RectTransform)hud.confirmNoButton.transform, new Vector2(0.52f, 0), new Vector2(0.94f, 0), new Vector2(0, 90), new Vector2(0, 110));
+
+        RectTransform resultCard = CreateDialog("ResultPanel", hudGO.transform, 600f, out GameObject resultPanel);
+        hud.resultPanel = resultPanel;
+        hud.resultTitleText = CreateText("Title", resultCard, "Done", 48, FontStyles.Bold, AccentColor);
+        Place(hud.resultTitleText.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(0, -80), new Vector2(-60, 90));
+        hud.resultBodyText = CreateText("Body", resultCard, "", 32, FontStyles.Normal, Color.white);
+        Place(hud.resultBodyText.rectTransform, new Vector2(0, 0.3f), new Vector2(1, 1), new Vector2(0, -80), new Vector2(-80, -100));
+        hud.resultButton = CreateButton("DoneButton", resultCard, "DONE", PrimaryColor, 34, out _);
+        Place((RectTransform)hud.resultButton.transform, new Vector2(0.1f, 0), new Vector2(0.9f, 0), new Vector2(0, 90), new Vector2(0, 120));
+
+        RectTransform errorCard = CreateDialog("ErrorPanel", hudGO.transform, 640f, out GameObject errorPanel);
+        hud.errorPanel = errorPanel;
+        hud.errorText = CreateText("Message", errorCard, "", 32, FontStyles.Normal, Color.white);
+        Place(hud.errorText.rectTransform, new Vector2(0, 0.45f), new Vector2(1, 1), Vector2.zero, new Vector2(-80, -60));
+        hud.errorActionButton = CreateButton("ActionButton", errorCard, "OPEN SETTINGS", PrimaryColor, 30, out hud.errorActionText);
+        Place((RectTransform)hud.errorActionButton.transform, new Vector2(0.1f, 0), new Vector2(0.9f, 0), new Vector2(0, 210), new Vector2(0, 110));
+        hud.errorBackButton = CreateButton("BackButton", errorCard, "BACK TO MENU", SecondaryColor, 30, out _);
+        Place((RectTransform)hud.errorBackButton.transform, new Vector2(0.1f, 0), new Vector2(0.9f, 0), new Vector2(0, 80), new Vector2(0, 100));
+
+        return hud;
     }
 
+    private static void CreateNotifier(Transform parent)
+    {
+        var notifierGO = new GameObject("Notifier", typeof(RectTransform));
+        notifierGO.layer = UILayer;
+        notifierGO.transform.SetParent(parent, false);
+        Stretch(notifierGO.GetComponent<RectTransform>());
+        notifierGO.transform.SetAsLastSibling();
+
+        RectTransform banner = CreatePanel("Banner", notifierGO.transform, CardColor);
+        AnchorTop(banner, -265f, 150f, horizontalInset: 30f);
+        TMP_Text message = CreateText("Message", banner, "", 30, FontStyles.Bold, Color.white);
+        Place(message.rectTransform, new Vector2(0, 0), new Vector2(1, 1), new Vector2(-110, 0), new Vector2(-260, -20));
+        message.enableAutoSizing = true;
+        message.fontSizeMin = 18;
+        message.fontSizeMax = 30;
+
+        Button action = CreateButton("Action", banner, "OK", PrimaryColor, 26, out TMP_Text actionText);
+        Place((RectTransform)action.transform, new Vector2(1, 0.5f), new Vector2(1, 0.5f), new Vector2(-120, 0), new Vector2(200, 90));
+
+        var notifier = notifierGO.AddComponent<UINotifier>();
+        SetSerialized(notifier, "root", banner.gameObject);
+        SetSerialized(notifier, "background", banner.GetComponent<Image>());
+        SetSerialized(notifier, "messageText", message);
+        SetSerialized(notifier, "actionButton", action);
+        SetSerialized(notifier, "actionText", actionText);
+        banner.gameObject.SetActive(false);
+    }
+
+    // ───────────────────────── UI building blocks ─────────────────────────
+
+    private static Transform CreateCanvas(string name, int sortingOrder)
+    {
+        var canvasGO = new GameObject(name, typeof(RectTransform), typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
+        canvasGO.layer = UILayer;
+        var canvas = canvasGO.GetComponent<Canvas>();
+        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+        canvas.sortingOrder = sortingOrder;
+        ConfigureScaler(canvasGO.GetComponent<CanvasScaler>());
+
+        var safe = new GameObject("SafeArea", typeof(RectTransform), typeof(SafeAreaFitter));
+        safe.layer = UILayer;
+        safe.transform.SetParent(canvasGO.transform, false);
+        Stretch(safe.GetComponent<RectTransform>());
+        return safe.transform;
+    }
+
+    private static void ConfigureScaler(CanvasScaler scaler)
+    {
+        if (scaler == null) return;
+        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+        scaler.referenceResolution = new Vector2(1080, 1920);
+        scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
+        scaler.matchWidthOrHeight = 0.5f;
+    }
+
+    private static RectTransform CreateDialog(string name, Transform parent, float height, out GameObject panel)
+    {
+        var dim = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
+        dim.layer = UILayer;
+        dim.transform.SetParent(parent, false);
+        Stretch(dim.GetComponent<RectTransform>());
+        dim.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.7f); // Blocks taps behind the dialog.
+        panel = dim;
+
+        RectTransform card = CreatePanel("Card", dim.transform, CardColor);
+        card.anchorMin = new Vector2(0.06f, 0.5f);
+        card.anchorMax = new Vector2(0.94f, 0.5f);
+        card.sizeDelta = new Vector2(0, height);
+        card.anchoredPosition = Vector2.zero;
+        dim.SetActive(false);
+        return card;
+    }
+
+    private static RectTransform CreatePanel(string name, Transform parent, Color color)
+    {
+        Image image = CreateImage(name, parent, color, RoundedSprite, sliced: true);
+        return image.rectTransform;
+    }
+
+    private static Image CreateImage(string name, Transform parent, Color color, Sprite sprite, bool sliced)
+    {
+        var go = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
+        go.layer = UILayer;
+        go.transform.SetParent(parent, false);
+        var image = go.GetComponent<Image>();
+        image.color = color;
+        image.sprite = sprite;
+        if (sprite != null && sliced)
+        {
+            image.type = Image.Type.Sliced;
+            image.pixelsPerUnitMultiplier = 0.25f; // Larger corner radius at phone resolution.
+        }
+        return image;
+    }
+
+    private static TMP_Text CreateText(string name, Transform parent, string text, float size, FontStyles style, Color color)
+    {
+        var go = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(TextMeshProUGUI));
+        go.layer = UILayer;
+        go.transform.SetParent(parent, false);
+        var tmp = go.GetComponent<TextMeshProUGUI>();
+        var font = AssetDatabase.LoadAssetAtPath<TMP_FontAsset>(FontPath);
+        if (font != null) tmp.font = font;
+        tmp.text = text;
+        tmp.fontSize = size;
+        tmp.fontStyle = style;
+        tmp.color = color;
+        tmp.alignment = TextAlignmentOptions.Center;
+        tmp.textWrappingMode = TextWrappingModes.Normal;
+        tmp.raycastTarget = false;
+        return tmp;
+    }
+
+    private static Button CreateButton(string name, Transform parent, string label, Color color, float fontSize, out TMP_Text labelText)
+    {
+        Image image = CreateImage(name, parent, color, RoundedSprite, sliced: true);
+        var button = image.gameObject.AddComponent<Button>();
+        ColorBlock colors = button.colors;
+        colors.normalColor = Color.white;
+        colors.highlightedColor = new Color(1f, 1f, 1f, 0.92f);
+        colors.pressedColor = new Color(0.75f, 0.75f, 0.75f, 1f);
+        colors.disabledColor = new Color(1f, 1f, 1f, 0.35f);
+        button.colors = colors;
+
+        labelText = CreateText("Label", image.transform, label, fontSize, FontStyles.Bold, Color.white);
+        Stretch(labelText.rectTransform);
+        labelText.enableAutoSizing = true;
+        labelText.fontSizeMin = 16;
+        labelText.fontSizeMax = fontSize;
+        labelText.margin = new Vector4(20, 0, 20, 0);
+        return button;
+    }
+
+    private static Sprite RoundedSprite => AssetDatabase.GetBuiltinExtraResource<Sprite>("UI/Skin/UISprite.psd");
+
+    private static void Stretch(RectTransform rt)
+    {
+        rt.anchorMin = Vector2.zero;
+        rt.anchorMax = Vector2.one;
+        rt.offsetMin = Vector2.zero;
+        rt.offsetMax = Vector2.zero;
+    }
+
+    private static void Place(RectTransform rt, Vector2 anchorMin, Vector2 anchorMax, Vector2 anchoredPosition, Vector2 sizeDelta)
+    {
+        rt.anchorMin = anchorMin;
+        rt.anchorMax = anchorMax;
+        rt.pivot = new Vector2(0.5f, 0.5f);
+        rt.anchoredPosition = anchoredPosition;
+        rt.sizeDelta = sizeDelta;
+    }
+
+    private static void AnchorTop(RectTransform rt, float y, float height, float horizontalInset = 0f)
+    {
+        rt.anchorMin = new Vector2(0, 1);
+        rt.anchorMax = new Vector2(1, 1);
+        rt.pivot = new Vector2(0.5f, 1);
+        rt.anchoredPosition = new Vector2(0, y);
+        rt.sizeDelta = new Vector2(-2f * horizontalInset, height);
+    }
+
+    private static void AnchorBottom(RectTransform rt, float y, float height, float horizontalInset = 0f)
+    {
+        rt.anchorMin = new Vector2(0, 0);
+        rt.anchorMax = new Vector2(1, 0);
+        rt.pivot = new Vector2(0.5f, 0);
+        rt.anchoredPosition = new Vector2(0, y);
+        rt.sizeDelta = new Vector2(-2f * horizontalInset, height);
+    }
+
+    private static void CreateEventSystem()
+    {
+        var go = new GameObject("EventSystem", typeof(EventSystem), typeof(InputSystemUIInputModule));
+        go.GetComponent<InputSystemUIInputModule>().AssignDefaultActions();
+    }
+
+    private static void CreateEventSystemIfMissing(Scene scene)
+    {
+        EventSystem existing = FindInScene<EventSystem>(scene).FirstOrDefault();
+        if (existing == null)
+        {
+            CreateEventSystem();
+            return;
+        }
+
+        GameObject go = existing.gameObject;
+        RemoveMissingScripts(go);
+        var legacy = go.GetComponent<StandaloneInputModule>();
+        if (legacy != null) Object.DestroyImmediate(legacy);
+        var module = GetOrAdd<InputSystemUIInputModule>(go);
+        module.AssignDefaultActions();
+    }
+
+    /// <summary>
+    /// GetComponent can return Unity's "fake null" in the Editor, which the ??
+    /// operator treats as non-null; compare with == instead.
+    /// </summary>
+    private static T GetOrAdd<T>(GameObject go) where T : Component
+    {
+        T component = go.GetComponent<T>();
+        if (component == null) component = go.AddComponent<T>();
+        return component;
+    }
+
+    // ───────────────────────── Assets ─────────────────────────
+
+    private static Material EnsureMaterial(string path, bool transparent, bool doubleSided)
+    {
+        var material = AssetDatabase.LoadAssetAtPath<Material>(path);
+        if (material != null) return material;
+
+        Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
+        if (shader == null)
+        {
+            Debug.LogError("BMU AR: URP Unlit shader not found.");
+            return null;
+        }
+
+        if (!AssetDatabase.IsValidFolder(MaterialsFolder)) AssetDatabase.CreateFolder("Assets", "Materials");
+        material = new Material(shader) { name = Path.GetFileNameWithoutExtension(path) };
+        ARPathRenderer.ConfigureUnlit(material, transparent, doubleSided);
+        AssetDatabase.CreateAsset(material, path);
+        return material;
+    }
+
+    /// <summary>Draws a clean, high-resolution arrow sprite (pointing up) and imports it.</summary>
+    private static Sprite EnsureArrowSprite()
+    {
+        var existing = AssetDatabase.LoadAssetAtPath<Sprite>(ArrowSpritePath);
+        if (existing != null) return existing;
+
+        if (!AssetDatabase.IsValidFolder("Assets/UI")) AssetDatabase.CreateFolder("Assets", "UI");
+        if (!AssetDatabase.IsValidFolder(GeneratedUIFolder)) AssetDatabase.CreateFolder("Assets/UI", "Generated");
+
+        const int size = 256;
+        const int supersample = 4;
+        Vector2[] polygon =
+        {
+            new Vector2(0.50f, 0.96f), // tip
+            new Vector2(0.90f, 0.52f),
+            new Vector2(0.64f, 0.52f),
+            new Vector2(0.64f, 0.06f),
+            new Vector2(0.36f, 0.06f),
+            new Vector2(0.36f, 0.52f),
+            new Vector2(0.10f, 0.52f)
+        };
+
+        var tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
+        var pixels = new Color32[size * size];
+        for (int y = 0; y < size; y++)
+        {
+            for (int x = 0; x < size; x++)
+            {
+                int inside = 0;
+                for (int sy = 0; sy < supersample; sy++)
+                for (int sx = 0; sx < supersample; sx++)
+                {
+                    var p = new Vector2((x + (sx + 0.5f) / supersample) / size, (y + (sy + 0.5f) / supersample) / size);
+                    if (PointInPolygon(p, polygon)) inside++;
+                }
+                byte alpha = (byte)(255 * inside / (supersample * supersample));
+                pixels[y * size + x] = new Color32(255, 255, 255, alpha);
+            }
+        }
+        tex.SetPixels32(pixels);
+        tex.Apply();
+
+        File.WriteAllBytes(ArrowSpritePath, tex.EncodeToPNG());
+        Object.DestroyImmediate(tex);
+        AssetDatabase.ImportAsset(ArrowSpritePath, ImportAssetOptions.ForceUpdate);
+
+        var importer = (TextureImporter)AssetImporter.GetAtPath(ArrowSpritePath);
+        importer.textureType = TextureImporterType.Sprite;
+        importer.spriteImportMode = SpriteImportMode.Single;
+        importer.alphaIsTransparency = true;
+        importer.mipmapEnabled = false;
+        importer.SaveAndReimport();
+
+        return AssetDatabase.LoadAssetAtPath<Sprite>(ArrowSpritePath);
+    }
+
+    private static bool PointInPolygon(Vector2 p, Vector2[] polygon)
+    {
+        bool inside = false;
+        for (int i = 0, j = polygon.Length - 1; i < polygon.Length; j = i++)
+        {
+            if ((polygon[i].y > p.y) != (polygon[j].y > p.y) &&
+                p.x < (polygon[j].x - polygon[i].x) * (p.y - polygon[i].y) / (polygon[j].y - polygon[i].y) + polygon[i].x)
+            {
+                inside = !inside;
+            }
+        }
+        return inside;
+    }
+
+    // ───────────────────────── Generic helpers ─────────────────────────
+
+    private static List<T> FindInScene<T>(Scene scene) where T : Component
+    {
+        var result = new List<T>();
+        if (!scene.IsValid() || !scene.isLoaded) return result;
+        foreach (GameObject root in scene.GetRootGameObjects())
+        {
+            result.AddRange(root.GetComponentsInChildren<T>(true));
+        }
+        return result;
+    }
+
+    private static List<GameObject> FindByName(Scene scene, string name)
+    {
+        var result = new List<GameObject>();
+        if (!scene.IsValid() || !scene.isLoaded) return result;
+        foreach (GameObject root in scene.GetRootGameObjects())
+        {
+            foreach (Transform t in root.GetComponentsInChildren<Transform>(true))
+            {
+                if (t.name == name) result.Add(t.gameObject);
+            }
+        }
+        // Parents before children, and never both: destroying a parent removes its children.
+        return result.Where(go => !result.Any(other => other != go && go.transform.IsChildOf(other.transform))).ToList();
+    }
+
+    /// <summary>Deletes prefab instances whose prefab asset no longer exists (old AR template leftovers).</summary>
+    private static void RemoveMissingPrefabInstances(Scene scene)
+    {
+        var broken = new List<GameObject>();
+        foreach (GameObject root in scene.GetRootGameObjects())
+        {
+            foreach (Transform t in root.GetComponentsInChildren<Transform>(true))
+            {
+                GameObject go = t.gameObject;
+                if (PrefabUtility.IsPrefabAssetMissing(go) && PrefabUtility.IsOutermostPrefabInstanceRoot(go)) broken.Add(go);
+            }
+        }
+        foreach (GameObject go in broken)
+        {
+            if (go == null) continue;
+            Debug.Log($"BMU AR: Removed missing prefab instance '{go.name}'.");
+            Object.DestroyImmediate(go);
+        }
+    }
+
+    private static void RemoveMissingScripts(GameObject root)
+    {
+        foreach (Transform t in root.GetComponentsInChildren<Transform>(true))
+        {
+            int removed = GameObjectUtility.RemoveMonoBehavioursWithMissingScript(t.gameObject);
+            if (removed > 0) Debug.Log($"BMU AR: Removed {removed} missing script(s) from '{t.name}'.");
+        }
+    }
+
+    private static void SetSerialized(Object target, string field, Object value)
+    {
+        var so = new SerializedObject(target);
+        SerializedProperty prop = so.FindProperty(field);
+        if (prop == null)
+        {
+            Debug.LogError($"BMU AR: Field '{field}' not found on {target.GetType().Name}.");
+            return;
+        }
+        prop.objectReferenceValue = value;
+        so.ApplyModifiedPropertiesWithoutUndo();
+    }
+
+    private static void SetProp(SerializedObject so, string name, object value)
+    {
+        SerializedProperty prop = so.FindProperty(name);
+        if (prop == null) return;
+        switch (value)
+        {
+            case Object o: prop.objectReferenceValue = o; break;
+            case float f: prop.floatValue = f; break;
+            case int i: prop.intValue = i; break;
+            case string s: prop.stringValue = s; break;
+        }
+    }
+
+    // ───────────────────────── Project settings ─────────────────────────
+
+    [MenuItem("Tools/BMU AR/Apply Portrait Settings")]
     public static void ConfigureScreenAndUI()
     {
-        // 1. Force Portrait orientation in PlayerSettings
         PlayerSettings.defaultInterfaceOrientation = UIOrientation.Portrait;
         PlayerSettings.allowedAutorotateToPortrait = true;
         PlayerSettings.allowedAutorotateToPortraitUpsideDown = false;
         PlayerSettings.allowedAutorotateToLandscapeRight = false;
         PlayerSettings.allowedAutorotateToLandscapeLeft = false;
-        PlayerSettings.defaultScreenWidth = 1080;
-        PlayerSettings.defaultScreenHeight = 1920;
+        Debug.Log("BMU AR: Portrait orientation configured.");
+    }
 
-        // 2. Adjust CanvasScaler on Canvas
-        GameObject canvasGO = GameObject.Find("Canvas");
-        if (canvasGO != null)
+    [MenuItem("Tools/BMU AR/Upgrade Plugin Importers (Fix Schema Warnings)")]
+    public static void UpgradePluginImporters()
+    {
+        int upgraded = 0;
+        foreach (string guid in AssetDatabase.FindAssets("", new[] { "Assets/Plugins", "Assets/Firebase" }))
         {
-            CanvasScaler scaler = canvasGO.GetComponent<CanvasScaler>();
-            if (scaler != null)
+            string path = AssetDatabase.GUIDToAssetPath(guid);
+            if (AssetImporter.GetAtPath(path) is PluginImporter importer)
             {
-                scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-                scaler.referenceResolution = new Vector2(1080, 1920);
-                scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
-                scaler.matchWidthOrHeight = 0.5f;
-                EditorUtility.SetDirty(scaler);
+                importer.SaveAndReimport();
+                upgraded++;
             }
         }
-
-        // 3. Set GameView to phone portrait resolution (1080x1920) if editor window is open
-        EnsurePortraitGameViewSize();
-
-        Debug.Log("BMU AR: Configured PlayerSettings and CanvasScaler for phone portrait orientation.");
+        AssetDatabase.SaveAssets();
+        Debug.Log($"BMU AR: Re-saved {upgraded} plugin importers.");
     }
 
-    private static void EnsurePortraitGameViewSize()
+    // ───────────────────────── Builds ─────────────────────────
+
+    [MenuItem("Tools/BMU AR/Build Development APK (for testing)")]
+    public static void BuildDevelopmentApk()
     {
-        try
+        EditorUserBuildSettings.buildAppBundle = false;
+        Build(Path.Combine("Builds", "BMUARR-dev.apk"), BuildOptions.Development);
+    }
+
+    [MenuItem("Tools/BMU AR/Build Release AAB (Play Store)")]
+    public static void BuildReleaseBundle()
+    {
+        if (!CheckReleaseKeystore()) return;
+        EditorUserBuildSettings.buildAppBundle = true;
+        Build(Path.Combine("Builds", "BMUARR.aab"), BuildOptions.None);
+    }
+
+    /// <summary>Release build as an APK, for installing directly on phones (testers, friends).</summary>
+    [MenuItem("Tools/BMU AR/Build Release APK (share directly)")]
+    public static void BuildReleaseApk()
+    {
+        if (!CheckReleaseKeystore()) return;
+        EditorUserBuildSettings.buildAppBundle = false;
+        Build(Path.Combine("Builds", "BMUARR.apk"), BuildOptions.None);
+    }
+
+    private static bool CheckReleaseKeystore()
+    {
+        bool configured = PlayerSettings.Android.useCustomKeystore &&
+                          !string.IsNullOrEmpty(PlayerSettings.Android.keystoreName) &&
+                          !string.IsNullOrEmpty(PlayerSettings.Android.keystorePass) &&
+                          !string.IsNullOrEmpty(PlayerSettings.Android.keyaliasPass);
+        if (configured) return true;
+
+        const string message =
+            "Release builds must be signed with your own keystore, and Unity needs its passwords " +
+            "(it forgets them when the Editor restarts).\n\n" +
+            "Player Settings > Android > Publishing Settings: select your keystore and enter both passwords.";
+        Debug.LogError("BMU AR: " + message);
+        if (!Application.isBatchMode) EditorUtility.DisplayDialog("Keystore required", message, "OK");
+        return false;
+    }
+
+    private static void Build(string relativePath, BuildOptions options)
+    {
+        EnsureFirebasePluginsForAndroid();
+
+        string[] scenes = EditorBuildSettings.scenes.Where(s => s.enabled).Select(s => s.path).ToArray();
+        if (scenes.Length < 2 || !scenes.Contains(MenuScenePath) || !scenes.Contains(NavigationScenePath))
         {
-            var gvSizesType = typeof(Editor).Assembly.GetType("UnityEditor.GameViewSizes");
-            if (gvSizesType == null) return;
-            var singleType = typeof(ScriptableSingleton<>).MakeGenericType(gvSizesType);
-            var instanceProp = singleType.GetProperty("instance");
-            var instance = instanceProp?.GetValue(null);
-            if (instance == null) return;
-
-            var currentGroupProp = instance.GetType().GetProperty("currentGroup");
-            var currentGroup = currentGroupProp?.GetValue(instance);
-            if (currentGroup == null) return;
-
-            var getTotalCountMethod = currentGroup.GetType().GetMethod("GetTotalCount");
-            var getGameViewSizeMethod = currentGroup.GetType().GetMethod("GetGameViewSize");
-            var addCustomSizeMethod = currentGroup.GetType().GetMethod("AddCustomSize");
-
-            int total = (int)getTotalCountMethod.Invoke(currentGroup, null);
-            bool found = false;
-            int targetIndex = 0;
-
-            for (int i = 0; i < total; i++)
-            {
-                var size = getGameViewSizeMethod.Invoke(currentGroup, new object[] { i });
-                var baseText = (string)size.GetType().GetProperty("baseText")?.GetValue(size);
-                if (baseText != null && (baseText.Contains("1080x1920") || baseText.Contains("Phone Portrait") || baseText.Contains("9:16")))
-                {
-                    found = true;
-                    targetIndex = i;
-                    break;
-                }
-            }
-
-            if (!found && addCustomSizeMethod != null)
-            {
-                var gvSizeType = typeof(Editor).Assembly.GetType("UnityEditor.GameViewSize");
-                var gvSizeTypeEnum = typeof(Editor).Assembly.GetType("UnityEditor.GameViewSizeType");
-                if (gvSizeType != null && gvSizeTypeEnum != null)
-                {
-                    object fixedRes = System.Enum.ToObject(gvSizeTypeEnum, 1);
-                    var ctor = gvSizeType.GetConstructor(new System.Type[] { gvSizeTypeEnum, typeof(int), typeof(int), typeof(string) });
-                    if (ctor != null)
-                    {
-                        var newSize = ctor.Invoke(new object[] { fixedRes, 1080, 1920, "Phone Portrait (1080x1920)" });
-                        addCustomSizeMethod.Invoke(currentGroup, new object[] { newSize });
-                        targetIndex = (int)getTotalCountMethod.Invoke(currentGroup, null) - 1;
-                        Debug.Log("BMU AR: Added 'Phone Portrait (1080x1920)' to Game View sizes.");
-                    }
-                }
-            }
-
-            var gameViewType = typeof(Editor).Assembly.GetType("UnityEditor.GameView");
-            if (gameViewType != null)
-            {
-                var gameView = EditorWindow.GetWindow(gameViewType, false, null, false);
-                if (gameView != null)
-                {
-                    var selectedSizeIndexProp = gameViewType.GetProperty("selectedSizeIndex", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
-                    if (selectedSizeIndexProp != null)
-                    {
-                        selectedSizeIndexProp.SetValue(gameView, targetIndex);
-                        gameView.Repaint();
-                        Debug.Log($"BMU AR: Set Game View to Phone Portrait (index {targetIndex}).");
-                    }
-                }
-            }
+            Debug.LogError("BMU AR: Run 'Tools/BMU AR/Build Production Scenes' first.");
+            return;
         }
-        catch (System.Exception ex)
+
+        string outputPath = Path.GetFullPath(Path.Combine(Application.dataPath, "..", relativePath));
+        Directory.CreateDirectory(Path.GetDirectoryName(outputPath));
+
+        BuildReport report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
         {
-            Debug.LogWarning("BMU AR: GameView size notice: " + ex.Message);
+            scenes = scenes,
+            locationPathName = outputPath,
+            target = BuildTarget.Android,
+            options = options
+        });
+
+        if (report.summary.result == BuildResult.Succeeded)
+        {
+            Debug.Log($"BMU AR: Build succeeded: {outputPath} ({report.summary.totalSize / (1024 * 1024)} MB)");
+            if (!Application.isBatchMode) EditorUtility.RevealInFinder(outputPath);
+        }
+        else
+        {
+            Debug.LogError($"BMU AR: Build failed with {report.summary.totalErrors} error(s). See the Console.");
         }
     }
 
-    private static void SetLayerRecursively(GameObject go, int layer)
+    private static void EnsureFirebasePluginsForAndroid()
     {
-        go.layer = layer;
-        foreach (Transform child in go.transform)
-        {
-            SetLayerRecursively(child.gameObject, layer);
-        }
-    }
-
-    private static LocationPromptModal SetupLocationPromptModal(Transform parent)
-    {
-        Transform existing = parent.Find("LocationPromptModal");
-        if (existing != null)
-        {
-            Undo.DestroyObjectImmediate(existing.gameObject);
-        }
-
-        GameObject modalGO = new GameObject("LocationPromptModal", typeof(RectTransform));
-        modalGO.transform.SetParent(parent, false);
-        RectTransform rt = modalGO.GetComponent<RectTransform>();
-        rt.anchorMin = Vector2.zero;
-        rt.anchorMax = Vector2.one;
-        rt.sizeDelta = Vector2.zero;
-
-        // Semi-transparent backdrop
-        Image bg = modalGO.AddComponent<Image>();
-        bg.color = new Color(0, 0, 0, 0.75f);
-
-        // Dialog Card
-        GameObject card = new GameObject("Card", typeof(RectTransform), typeof(Image));
-        card.transform.SetParent(modalGO.transform, false);
-        RectTransform cardRt = card.GetComponent<RectTransform>();
-        cardRt.sizeDelta = new Vector2(620, 520);
-        card.GetComponent<Image>().color = new Color(0.08f, 0.12f, 0.20f, 0.98f);
-
-        // Title
-        GameObject titleGO = CreateText("Title", card.transform, new Vector2(0, 175), new Vector2(560, 60), 32, FontStyles.Bold, Color.white);
-        // Message
-        GameObject msgGO = CreateText("Message", card.transform, new Vector2(0, 105), new Vector2(540, 75), 20, FontStyles.Normal, new Color(0.85f, 0.90f, 0.98f));
-        // Distance
-        GameObject distGO = CreateText("Distance", card.transform, new Vector2(0, 40), new Vector2(540, 40), 18, FontStyles.Italic, new Color(0.2f, 0.95f, 0.5f));
-
-        // Buttons
-        GameObject recBtn = CreateButton("RecordButton", card.transform, new Vector2(0, -45), new Vector2(480, 70), "RECORD PATH", new Color(0.12f, 0.55f, 0.95f));
-        GameObject guideBtn = CreateButton("GuideMeButton", card.transform, new Vector2(0, -35), new Vector2(480, 70), "GUIDE ME", new Color(0.15f, 0.85f, 0.45f));
-        GameObject reRecBtn = CreateButton("ReRecordButton", card.transform, new Vector2(0, -115), new Vector2(480, 50), "Re-record Path", new Color(0.25f, 0.3f, 0.4f));
-        GameObject cancelBtn = CreateButton("CancelButton", card.transform, new Vector2(0, -180), new Vector2(480, 48), "Back", new Color(0.18f, 0.20f, 0.28f));
-
-        LocationPromptModal prompt = modalGO.AddComponent<LocationPromptModal>();
-        prompt.titleText = titleGO.GetComponent<TMP_Text>();
-        prompt.messageText = msgGO.GetComponent<TMP_Text>();
-        prompt.distanceText = distGO.GetComponent<TMP_Text>();
-        prompt.recordButton = recBtn.GetComponent<Button>();
-        prompt.guideMeButton = guideBtn.GetComponent<Button>();
-        prompt.reRecordButton = reRecBtn.GetComponent<Button>();
-        prompt.cancelButton = cancelBtn.GetComponent<Button>();
-
-        SetLayerRecursively(modalGO, 5);
-        modalGO.SetActive(false);
-        return prompt;
-    }
-
-    private static GameObject SetupRecordingHUD(Transform parent, CampusNavigationManager navMgr)
-    {
-        Transform existing = parent.Find("RecordingHUD");
-        if (existing != null)
-        {
-            Undo.DestroyObjectImmediate(existing.gameObject);
-        }
-
-        GameObject hudGO = new GameObject("RecordingHUD", typeof(RectTransform));
-        hudGO.transform.SetParent(parent, false);
-        RectTransform rt = hudGO.GetComponent<RectTransform>();
-        rt.anchorMin = Vector2.zero;
-        rt.anchorMax = Vector2.one;
-        rt.sizeDelta = Vector2.zero;
-
-        // Top Status Header
-        GameObject topBar = new GameObject("TopBar", typeof(RectTransform), typeof(Image));
-        topBar.transform.SetParent(hudGO.transform, false);
-        RectTransform barRt = topBar.GetComponent<RectTransform>();
-        barRt.anchorMin = new Vector2(0, 1);
-        barRt.anchorMax = new Vector2(1, 1);
-        barRt.pivot = new Vector2(0.5f, 1);
-        barRt.anchoredPosition = Vector2.zero;
-        barRt.sizeDelta = new Vector2(0, 170);
-        topBar.GetComponent<Image>().color = new Color(0.06f, 0.08f, 0.12f, 0.94f);
-
-        GameObject cancelBtn = CreateButton("CancelButton", topBar.transform, Vector2.zero, new Vector2(110, 48), "Exit", new Color(0.35f, 0.35f, 0.40f));
-        RectTransform cancelRt = cancelBtn.GetComponent<RectTransform>();
-        cancelRt.anchorMin = new Vector2(0f, 0.5f);
-        cancelRt.anchorMax = new Vector2(0f, 0.5f);
-        cancelRt.pivot = new Vector2(0f, 0.5f);
-        cancelRt.anchoredPosition = new Vector2(25, 0);
-
-        GameObject title = CreateText("RecordingTitle", topBar.transform, new Vector2(30, -35), new Vector2(550, 45), 24, FontStyles.Bold, new Color(1f, 0.4f, 0.4f));
-        GameObject count = CreateText("AnchorCount", topBar.transform, new Vector2(0, -95), new Vector2(750, 50), 20, FontStyles.Normal, Color.yellow);
-
-        // Bottom Action Control Card
-        GameObject botCard = new GameObject("BottomControlCard", typeof(RectTransform), typeof(Image));
-        botCard.transform.SetParent(hudGO.transform, false);
-        RectTransform botRt = botCard.GetComponent<RectTransform>();
-        botRt.anchorMin = new Vector2(0.05f, 0.02f);
-        botRt.anchorMax = new Vector2(0.95f, 0.22f);
-        botRt.pivot = new Vector2(0.5f, 0);
-        botRt.offsetMin = botRt.offsetMax = Vector2.zero;
-        botCard.GetComponent<Image>().color = new Color(0.06f, 0.08f, 0.12f, 0.94f);
-
-        // Large '+ DROP START ANCHOR' Button
-        GameObject dropBtn = CreateButton("DropAnchorButton", botCard.transform, new Vector2(0, 60), new Vector2(480, 80), "+ DROP START ANCHOR", new Color(0.12f, 0.55f, 0.95f), centeredInParent: true);
-
-        // Large 'FINISH & SAVE' Button
-        GameObject finishBtn = CreateButton("FinishButton", botCard.transform, new Vector2(0, -45), new Vector2(480, 75), "FINISH & SAVE ROUTE", new Color(0.15f, 0.85f, 0.45f), centeredInParent: true);
-
-        navMgr.recordingTitleText = title.GetComponent<TMP_Text>();
-        navMgr.anchorCountText = count.GetComponent<TMP_Text>();
-        navMgr.dropAnchorButton = dropBtn.GetComponent<Button>();
-        navMgr.finishRecordingButton = finishBtn.GetComponent<Button>();
-        navMgr.cancelRecordingButton = cancelBtn.GetComponent<Button>();
-
-        SetLayerRecursively(hudGO, 5);
-        hudGO.SetActive(false);
-        return hudGO;
-    }
-
-    private static GameObject SetupGuidanceHUD(Transform parent, CampusNavigationManager navMgr)
-    {
-        Transform existing = parent.Find("GuidanceHUD");
-        if (existing != null)
-        {
-            Undo.DestroyObjectImmediate(existing.gameObject);
-        }
-
-        GameObject hudGO = new GameObject("GuidanceHUD", typeof(RectTransform));
-        hudGO.transform.SetParent(parent, false);
-        RectTransform rt = hudGO.GetComponent<RectTransform>();
-        rt.anchorMin = Vector2.zero;
-        rt.anchorMax = Vector2.one;
-        rt.sizeDelta = Vector2.zero;
-
-        // Top Status Header
-        GameObject topBar = new GameObject("TopBar", typeof(RectTransform), typeof(Image));
-        topBar.transform.SetParent(hudGO.transform, false);
-        RectTransform barRt = topBar.GetComponent<RectTransform>();
-        barRt.anchorMin = new Vector2(0, 1);
-        barRt.anchorMax = new Vector2(1, 1);
-        barRt.pivot = new Vector2(0.5f, 1);
-        barRt.anchoredPosition = Vector2.zero;
-        barRt.sizeDelta = new Vector2(0, 160);
-        topBar.GetComponent<Image>().color = new Color(0.06f, 0.08f, 0.12f, 0.94f);
-
-        GameObject destTitle = CreateText("GuidanceTitle", topBar.transform, new Vector2(0, -35), new Vector2(650, 45), 26, FontStyles.Bold, new Color(0.2f, 1f, 0.5f));
-        GameObject distInfo = CreateText("DistanceInfo", topBar.transform, new Vector2(0, -95), new Vector2(750, 45), 20, FontStyles.Normal, Color.white);
-
-        // Bottom Exit Button
-        GameObject botCard = new GameObject("BottomControlCard", typeof(RectTransform), typeof(Image));
-        botCard.transform.SetParent(hudGO.transform, false);
-        RectTransform botRt = botCard.GetComponent<RectTransform>();
-        botRt.anchorMin = new Vector2(0.08f, 0.03f);
-        botRt.anchorMax = new Vector2(0.92f, 0.12f);
-        botRt.offsetMin = botRt.offsetMax = Vector2.zero;
-        botCard.GetComponent<Image>().color = new Color(0.06f, 0.08f, 0.12f, 0.94f);
-
-        GameObject endBtn = CreateButton("EndNavButton", botCard.transform, Vector2.zero, new Vector2(460, 65), "EXIT NAVIGATION", new Color(0.85f, 0.25f, 0.25f), centeredInParent: true);
-
-        navMgr.guidanceDestinationText = destTitle.GetComponent<TMP_Text>();
-        navMgr.guidanceDistanceText = distInfo.GetComponent<TMP_Text>();
-        navMgr.endNavigationButton = endBtn.GetComponent<Button>();
-
-        SetLayerRecursively(hudGO, 5);
-        hudGO.SetActive(false);
-        return hudGO;
-    }
-
-    private static GameObject CreateText(string name, Transform parent, Vector2 anchoredPos, Vector2 size, float fontSize, FontStyles style, Color color)
-    {
-        GameObject go = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(TextMeshProUGUI));
-        go.layer = 5;
-        go.transform.SetParent(parent, false);
-        RectTransform rt = go.GetComponent<RectTransform>();
-        rt.anchorMin = new Vector2(0.5f, 0.5f);
-        rt.anchorMax = new Vector2(0.5f, 0.5f);
-        rt.pivot = new Vector2(0.5f, 0.5f);
-        rt.anchoredPosition = anchoredPos;
-        rt.sizeDelta = size;
-
-        TextMeshProUGUI tmp = go.GetComponent<TextMeshProUGUI>();
-        TMP_FontAsset font = AssetDatabase.LoadAssetAtPath<TMP_FontAsset>("Assets/TextMesh Pro/Resources/Fonts & Materials/LiberationSans SDF.asset");
-        if (font != null) tmp.font = font;
-        tmp.text = name;
-        tmp.fontSize = fontSize;
-        tmp.fontStyle = style;
-        tmp.color = color;
-        tmp.alignment = TextAlignmentOptions.Center;
-        return go;
-    }
-
-    private static GameObject CreateButton(string name, Transform parent, Vector2 pos, Vector2 size, string text, Color color, bool centeredInParent = false)
-    {
-        GameObject btnGO = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(Image), typeof(Button));
-        btnGO.layer = 5;
-        btnGO.transform.SetParent(parent, false);
-        RectTransform rt = btnGO.GetComponent<RectTransform>();
-        rt.anchorMin = new Vector2(0.5f, 0.5f);
-        rt.anchorMax = new Vector2(0.5f, 0.5f);
-        rt.pivot = new Vector2(0.5f, 0.5f);
-        rt.anchoredPosition = pos;
-        rt.sizeDelta = size;
-
-        Image img = btnGO.GetComponent<Image>();
-        img.color = color;
-
-        Button btn = btnGO.GetComponent<Button>();
-        ColorBlock cb = btn.colors;
-        cb.highlightedColor = Color.Lerp(color, Color.white, 0.25f);
-        cb.pressedColor = Color.Lerp(color, Color.black, 0.25f);
-        cb.disabledColor = new Color(color.r, color.g, color.b, 0.35f);
-        btn.colors = cb;
-
-        GameObject textGO = new GameObject("Text", typeof(RectTransform), typeof(CanvasRenderer), typeof(TextMeshProUGUI));
-        textGO.layer = 5;
-        textGO.transform.SetParent(btnGO.transform, false);
-        RectTransform textRt = textGO.GetComponent<RectTransform>();
-        textRt.anchorMin = Vector2.zero;
-        textRt.anchorMax = Vector2.one;
-        textRt.sizeDelta = Vector2.zero;
-
-        TextMeshProUGUI tmp = textGO.GetComponent<TextMeshProUGUI>();
-        TMP_FontAsset font = AssetDatabase.LoadAssetAtPath<TMP_FontAsset>("Assets/TextMesh Pro/Resources/Fonts & Materials/LiberationSans SDF.asset");
-        if (font != null) tmp.font = font;
-        tmp.text = text;
-        tmp.fontSize = 20;
-        tmp.fontStyle = FontStyles.Bold;
-        tmp.color = Color.white;
-        tmp.alignment = TextAlignmentOptions.Center;
-
-        return btnGO;
-    }
-
-    private static void WireDestinationButton(Transform parent, string buttonName, CampusNavigationManager navMgr, string destName)
-    {
-        Transform btnT = parent.Find(buttonName);
-        if (btnT == null) return;
-
-        Button btn = btnT.GetComponent<Button>();
-        if (btn == null) return;
-
-        while (btn.onClick.GetPersistentEventCount() > 0)
-        {
-            UnityEventTools.RemovePersistentListener(btn.onClick, 0);
-        }
-
-        UnityEventTools.AddStringPersistentListener(btn.onClick, navMgr.SelectDestination, destName);
-        Debug.Log($"BMU AR: Wired '{buttonName}' -> SelectDestination(\"{destName}\").");
-    }
-
-    [MenuItem("Tools/BMU AR/Refresh Compass Ring In Scene")]
-    public static void RefreshCompassRing()
-    {
-        GameObject itGO = GameObject.Find("ImageTarget_Compass");
-        if (itGO == null) return;
-
-        Transform root = itGO.transform.Find("ARContentRoot");
-        if (root == null)
-        {
-            root = new GameObject("ARContentRoot").transform;
-            root.SetParent(itGO.transform, false);
-        }
-        root.gameObject.SetActive(true);
-
-        Transform oldArrow = root.Find("DirectionArrow");
-        if (oldArrow != null) Undo.DestroyObjectImmediate(oldArrow.gameObject);
-        ARDirectionArrow arrowComp = root.GetComponent<ARDirectionArrow>();
-        if (arrowComp != null) Undo.DestroyObjectImmediate(arrowComp);
-
-        Transform ringT = root.Find("FloorCompassRing");
-        if (ringT == null)
-        {
-            GameObject ringGO = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-            ringGO.name = "FloorCompassRing";
-            ringGO.transform.SetParent(root, false);
-            ringGO.transform.localPosition = new Vector3(0, 0.002f, 0);
-            ringGO.transform.localScale = new Vector3(0.24f, 0.001f, 0.24f);
-            Collider col = ringGO.GetComponent<Collider>();
-            if (col != null) Undo.DestroyObjectImmediate(col);
-
-            Shader unlitShader = Shader.Find("Universal Render Pipeline/Unlit");
-            if (unlitShader == null) unlitShader = Shader.Find("Unlit/Color");
-            if (unlitShader == null) unlitShader = Shader.Find("Standard");
-            Material ringMat = new Material(unlitShader);
-            ringMat.color = new Color(0.15f, 0.85f, 0.45f, 0.7f);
-            ringGO.GetComponent<Renderer>().sharedMaterial = ringMat;
-        }
-
-        EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
-        EditorSceneManager.SaveOpenScenes();
-
-        Debug.Log("BMU AR: Floor Compass Ring refreshed in Scene View!");
-    }
-
-    [MenuItem("Tools/BMU AR/Build Android APK")]
-    public static void BuildAPK()
-    {
-        AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
-
-        // Ensure all required plugins are explicitly enabled for Android
-        string[] requiredDlls = new string[]
+        string[] requiredDlls =
         {
             "Assets/Firebase/Plugins/Firebase.App.dll",
             "Assets/Firebase/Plugins/Firebase.Auth.dll",
@@ -921,52 +1027,13 @@ public static class BMUARRSetup
             "Assets/Firebase/Plugins/Firebase.TaskExtension.dll",
             "Assets/Firebase/Plugins/Google.MiniJson.dll"
         };
-        foreach (var dll in requiredDlls)
+        foreach (string dll in requiredDlls)
         {
-            PluginImporter importer = AssetImporter.GetAtPath(dll) as PluginImporter;
-            if (importer != null && !importer.GetCompatibleWithPlatform(BuildTarget.Android))
+            if (AssetImporter.GetAtPath(dll) is PluginImporter importer && !importer.GetCompatibleWithPlatform(BuildTarget.Android))
             {
                 importer.SetCompatibleWithPlatform(BuildTarget.Android, true);
                 importer.SaveAndReimport();
-                Debug.Log($"BMU AR: Re-enabled Android platform compatibility for {dll}.");
-            }
-        }
-
-        string buildFolder = System.IO.Path.Combine(Application.dataPath, "..", "Builds");
-        if (!System.IO.Directory.Exists(buildFolder))
-        {
-            System.IO.Directory.CreateDirectory(buildFolder);
-        }
-
-        string apkPath = System.IO.Path.Combine(buildFolder, "BMUARR.apk");
-        Debug.Log($"BMU AR: Starting build to {apkPath}...");
-
-        BuildPlayerOptions options = new BuildPlayerOptions
-        {
-            scenes = new[] { "Assets/Scenes/SampleScene.unity" },
-            locationPathName = apkPath,
-            target = BuildTarget.Android,
-            options = BuildOptions.None
-        };
-
-        var report = BuildPipeline.BuildPlayer(options);
-        if (report.summary.result == UnityEditor.Build.Reporting.BuildResult.Succeeded)
-        {
-            Debug.Log($"BMU AR: Build succeeded! APK saved at: {apkPath}");
-            if (!Application.isBatchMode)
-            {
-                EditorUtility.RevealInFinder(apkPath);
-                EditorUtility.DisplayDialog("Build Succeeded",
-                    $"APK successfully generated!\n\nFile location:\n{apkPath}\n\nTransfer this APK to your phone and install it to test on campus!",
-                    "OK");
-            }
-        }
-        else
-        {
-            Debug.LogError($"BMU AR: Build failed with {report.summary.totalErrors} errors.");
-            if (!Application.isBatchMode)
-            {
-                EditorUtility.DisplayDialog("Build Failed", "Android build failed. Please check the Unity Console for details.", "OK");
+                Debug.Log($"BMU AR: Enabled Android for {dll}.");
             }
         }
     }

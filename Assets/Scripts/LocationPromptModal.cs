@@ -75,23 +75,22 @@ public class LocationPromptModal : MonoBehaviour
             titleText.text = destinationName;
         }
 
-        bool hasRecordedPath = PathStorageManager.HasPath(destinationName);
+        PathData data = PathStorageManager.LoadPath(destinationName);
+        bool hasRecordedPath = data != null;
 
         if (hasRecordedPath)
         {
-            PathData data = PathStorageManager.LoadPath(destinationName);
-            float dist = data != null ? data.totalDistanceMeters : 0f;
-            int turns = data != null && data.waypoints != null ? Mathf.Max(0, data.waypoints.Count - 2) : 0;
+            int turns = PathMath.FindTurns(data.GetPoints2D()).Count;
 
             if (messageText != null)
             {
-                messageText.text = "Path already mapped for this location!";
+                messageText.text = "A route is saved for this place. Start at the marker and tap Guide Me. Re-recording replaces the saved route.";
             }
 
             if (distanceText != null)
             {
                 distanceText.gameObject.SetActive(true);
-                distanceText.text = $"Distance: ~{dist:F1} meters  •  Turns: {turns}";
+                distanceText.text = $"Distance: ~{data.totalDistanceMeters:F0} m  •  Turns: {turns}";
             }
 
             if (recordButton != null) recordButton.gameObject.SetActive(false);
@@ -102,7 +101,7 @@ public class LocationPromptModal : MonoBehaviour
         {
             if (messageText != null)
             {
-                messageText.text = "No recorded path found for this location yet. Walk the route and drop anchors to map it!";
+                messageText.text = "No route saved yet. Stand at the marker, tap Record Path, then walk to this place.";
             }
 
             if (distanceText != null)

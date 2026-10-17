@@ -1,33 +1,37 @@
+using System.Collections;
 using Firebase.Auth;
 using Firebase.Extensions;
-using System.Collections;
 using TMPro;
 using UnityEngine;
+using UnityEngine.UI;
 
+/// <summary>
+/// Google Sign-In through the Android bridge (com.bmu.googleauth.GoogleAuthBridge),
+/// then Firebase Auth. Must live on the GameObject named "Ui Manager": the Java
+/// bridge sends its result there with UnitySendMessage.
+/// </summary>
 public class GoogleAuthManager : MonoBehaviour
 {
-    private FirebaseAuth auth;
-
-#if UNITY_ANDROID && !UNITY_EDITOR
-    private AndroidJavaClass googleAuthBridge;
-#endif
+    private const string Tag = "GoogleAuth";
+    private const float FirebaseWaitSeconds = 15f;
 
     [Header("UI")]
     public UIManager uiManager;
     public TMP_Text signedInText;
 
-    private bool firebaseReady = false;
-    private bool signInInProgress = false;
+    [Tooltip("Optional: the 'Continue with Google' button, disabled while signing in.")]
+    public Button signInButton;
+
+    private FirebaseAuth auth;
+    private bool signInInProgress;
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+    private AndroidJavaClass googleAuthBridge;
+#endif
 
     void Start()
     {
-        // Hide the signed-in message when the app starts
-        if (signedInText != null)
-        {
-            signedInText.gameObject.SetActive(false);
-        }
-
-        // Wait for FirebaseTest to finish initializing Firebase
+        if (signedInText != null) signedInText.gameObject.SetActive(false);
         StartCoroutine(WaitForFirebase());
 
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -35,282 +39,145 @@ public class GoogleAuthManager : MonoBehaviour
 #endif
     }
 
+    /// <summary>True when Firebase already has a signed-in user from an earlier session.</summary>
+    public bool HasSignedInUser => auth != null && auth.CurrentUser != null;
+
     private IEnumerator WaitForFirebase()
     {
-        Debug.Log(
-            "GoogleAuthManager: Waiting for Firebase..."
-        );
-
-        // Wait until FirebaseTest reports that Firebase is ready
-        while (!FirebaseTest.IsReady)
+        float deadline = Time.realtimeSinceStartup + FirebaseWaitSeconds;
+        while (!FirebaseBootstrap.IsReady && !FirebaseBootstrap.IsFailed && Time.realtimeSinceStartup < deadline)
         {
             yield return null;
         }
 
-        auth = FirebaseTest.Auth;
-
-        if (auth != null)
-        {
-            firebaseReady = true;
-
-            Debug.Log(
-                "GoogleAuthManager: Firebase Auth is ready."
-            );
-        }
-        else
-        {
-            Debug.LogError(
-                "GoogleAuthManager: FirebaseTest reports ready, "
-                + "but FirebaseAuth is null."
-            );
-        }
+        auth = FirebaseBootstrap.Auth;
+        if (auth == null) AppLog.Warn(Tag, "Firebase Auth unavailable; Google sign-in disabled.");
     }
 
 #if UNITY_ANDROID && !UNITY_EDITOR
-
     private void InitializeGoogleBridge()
     {
         try
         {
-            googleAuthBridge =
-                new AndroidJavaClass(
-                    "com.bmu.googleauth.GoogleAuthBridge"
-                );
-
-            using (AndroidJavaClass unityPlayer =
-                   new AndroidJavaClass(
-                       "com.unity3d.player.UnityPlayer"))
+            googleAuthBridge = new AndroidJavaClass("com.bmu.googleauth.GoogleAuthBridge");
+            using (var unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer"))
+            using (var activity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity"))
             {
-                using (AndroidJavaObject activity =
-                       unityPlayer.GetStatic<AndroidJavaObject>(
-                           "currentActivity"))
-                {
-                    googleAuthBridge.CallStatic(
-                        "initialize",
-                        activity
-                    );
-                }
+                googleAuthBridge.CallStatic("initialize", activity);
             }
-
-            Debug.Log(
-                "GoogleAuthManager: Android Google bridge initialized."
-            );
         }
         catch (System.Exception e)
         {
-            Debug.LogError(
-                "GoogleAuthManager: Failed to initialize Google bridge: "
-                + e.Message
-            );
+            googleAuthBridge = null;
+            AppLog.Error(Tag, "Google bridge failed to initialise: " + e.Message);
         }
     }
-
 #endif
 
     public void SignInWithGoogle()
     {
-        Debug.Log(
-            "GoogleAuthManager: Google Sign-In button pressed."
-        );
+        if (signInInProgress) return;
 
-        if (!firebaseReady)
+        if (auth == null)
         {
-            Debug.Log(
-                "GoogleAuthManager: Firebase is still initializing. Please wait."
-            );
+            UINotifier.Show(FirebaseBootstrap.IsFailed
+                ? "Sign-in is unavailable right now. You can continue without signing in."
+                : "Still starting up. Try again in a moment.", NoticeKind.Warning);
             return;
         }
 
 #if UNITY_ANDROID && !UNITY_EDITOR
-
         if (googleAuthBridge == null)
         {
-            Debug.LogError(
-                "GoogleAuthManager: Google bridge is not initialized."
-            );
+            UINotifier.Show("Google sign-in is not available on this device.", NoticeKind.Error);
             return;
         }
 
+        SetBusy(true);
         googleAuthBridge.CallStatic("signIn");
-
 #else
-
-        Debug.Log(
-            "Google Sign-In works on an Android device build."
-        );
-
+        UINotifier.Show("Google sign-in only works in the Android app.", NoticeKind.Info);
 #endif
     }
 
-    // Called by GoogleAuthBridge
+    /// <summary>Called by GoogleAuthBridge via UnitySendMessage. Never log the payload: it holds the ID token.</summary>
     public void OnGoogleAuthResult(string result)
     {
-        Debug.Log(
-            "GoogleAuthManager: Received result: " + result
-        );
-
         if (string.IsNullOrEmpty(result))
         {
-            Debug.LogError(
-                "GoogleAuthManager: Empty Google Sign-In result."
-            );
+            Fail("Empty sign-in result.", "Sign-in failed. Please try again.");
             return;
         }
 
         if (result.StartsWith("SUCCESS|"))
         {
-            string googleIdToken =
-                result.Substring("SUCCESS|".Length);
-
-            if (string.IsNullOrEmpty(googleIdToken))
+            string idToken = result.Substring("SUCCESS|".Length);
+            if (string.IsNullOrEmpty(idToken) || auth == null)
             {
-                Debug.LogError(
-                    "GoogleAuthManager: Google ID token is empty."
-                );
+                Fail("Missing ID token or Firebase not ready.", "Sign-in failed. Please try again.");
                 return;
             }
-
-            if (!firebaseReady || auth == null)
-            {
-                Debug.LogError(
-                    "GoogleAuthManager: Firebase is not ready."
-                );
-                return;
-            }
-
-            SignInToFirebase(googleIdToken);
+            SignInToFirebase(idToken);
         }
         else if (result.StartsWith("ERROR|"))
         {
-            string errorMessage =
-                result.Substring("ERROR|".Length);
-
-            Debug.LogError(
-                "Google Sign-In failed: " + errorMessage
-            );
+            // The bridge's error text is technical; keep it out of the UI.
+            Fail("Google sign-in returned an error.", "Google sign-in was cancelled or failed.");
         }
         else
         {
-            Debug.LogError(
-                "GoogleAuthManager: Unknown result: " + result
-            );
+            Fail("Unknown sign-in result format.", "Sign-in failed. Please try again.");
         }
     }
 
-    private void SignInToFirebase(string googleIdToken)
+    private void SignInToFirebase(string idToken)
     {
-        if (signInInProgress)
+        Credential credential = GoogleAuthProvider.GetCredential(idToken, null);
+
+        auth.SignInWithCredentialAsync(credential).ContinueWithOnMainThread(task =>
         {
-            Debug.Log(
-                "GoogleAuthManager: Sign-in already in progress."
-            );
-            return;
-        }
-
-        if (auth == null)
-        {
-            Debug.LogError(
-                "GoogleAuthManager: FirebaseAuth is null."
-            );
-            return;
-        }
-
-        signInInProgress = true;
-
-        Credential credential =
-            GoogleAuthProvider.GetCredential(
-                googleIdToken,
-                null
-            );
-
-        auth.SignInWithCredentialAsync(credential)
-            .ContinueWithOnMainThread(task =>
+            if (task.IsCanceled || task.IsFaulted)
             {
-                signInInProgress = false;
+                Fail("Firebase sign-in failed: " + (task.Exception?.GetBaseException().Message ?? "cancelled"),
+                     "Could not sign in. Check your connection and try again.");
+                return;
+            }
 
-                if (task.IsCanceled)
-                {
-                    Debug.LogError(
-                        "GoogleAuthManager: Firebase Google Sign-In was canceled."
-                    );
-                    return;
-                }
+            SetBusy(false);
+            FirebaseUser user = task.Result;
+            AppLog.Info(Tag, "Signed in.");
 
-                if (task.IsFaulted)
-                {
-                    Debug.LogError(
-                        "GoogleAuthManager: Firebase Google Sign-In failed: "
-                        + task.Exception
-                    );
-                    return;
-                }
-
-                FirebaseUser user = task.Result;
-
-                string displayName = user.DisplayName;
-
-                if (string.IsNullOrEmpty(displayName))
-                {
-                    displayName = user.Email;
-                }
-
-                Debug.Log(
-                    "GOOGLE LOGIN SUCCESSFUL"
-                );
-
-                Debug.Log(
-                    "Firebase User: " + displayName
-                );
-
-                Debug.Log(
-                    "Firebase Email: " + user.Email
-                );
-
-                Debug.Log(
-                    "Firebase UID: " + user.UserId
-                );
-
-                // Show the successful login message
-                if (signedInText != null)
-                {
-                    signedInText.text =
-                        "Signed in as " + displayName;
-
-                    signedInText.gameObject.SetActive(true);
-                }
-
-                // Show it for 2 seconds, then open MainPanel
-                StartCoroutine(
-                    OpenMainPanelAfterLogin()
-                );
-            });
+            string displayName = string.IsNullOrEmpty(user.DisplayName) ? "your Google account" : user.DisplayName;
+            if (signedInText != null)
+            {
+                signedInText.text = "Signed in as " + displayName;
+                signedInText.gameObject.SetActive(true);
+            }
+            StartCoroutine(OpenMainPanelAfterLogin());
+        });
     }
 
     private IEnumerator OpenMainPanelAfterLogin()
     {
-        yield return new WaitForSeconds(2f);
-
-        if (uiManager != null)
-        {
-            uiManager.GoToMain();
-        }
-        else
-        {
-            Debug.LogError(
-                "GoogleAuthManager: UI Manager is not assigned."
-            );
-        }
+        yield return new WaitForSeconds(1.5f);
+        if (uiManager != null) uiManager.GoToMain();
     }
 
     public void SkipLogin()
     {
-        Debug.Log(
-            "GoogleAuthManager: Skip Login pressed."
-        );
+        if (uiManager != null) uiManager.GoToMain();
+    }
 
-        if (uiManager != null)
-        {
-            uiManager.GoToMain();
-        }
+    private void Fail(string logMessage, string userMessage)
+    {
+        SetBusy(false);
+        AppLog.Warn(Tag, logMessage);
+        UINotifier.Show(userMessage, NoticeKind.Error);
+    }
+
+    private void SetBusy(bool busy)
+    {
+        signInInProgress = busy;
+        if (signInButton != null) signInButton.interactable = !busy;
     }
 }

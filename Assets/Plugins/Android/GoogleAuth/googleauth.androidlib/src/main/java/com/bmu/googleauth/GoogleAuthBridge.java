@@ -107,7 +107,8 @@ public class GoogleAuthBridge {
 
     new Handler(Looper.getMainLooper()).post(() -> {
 
-        Log.d(TAG, "Preparing to send result to Unity: " + result);
+        // Never log the result itself: on success it carries the Google ID token.
+        Log.d(TAG, "Sending sign-in result to Unity.");
 
         try {
             Class<?> unityPlayer =

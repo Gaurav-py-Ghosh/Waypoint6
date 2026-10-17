@@ -1,354 +1,473 @@
 using System.Collections.Generic;
+using TMPro;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 /// <summary>
-/// Renders the 3D AR navigation pathway to real-world scale:
-/// - Wide (0.45m), glowing transparent emerald ribbon line on the floor.
-/// - Catmull-Rom spline smoothing (via SplineMath) for fluid turn curves.
-/// - In Recording Mode: displays start circle and anchor spheres at each recorded turn.
-/// - In Guide Mode: hides anchor dots, displaying only the smooth glowing line
-///   and the 3D Destination Stop Marker with billboard text.
-/// - Parented to StabilizedOrigin so it is NEVER culled when the phone turns away from the paper target.
+/// Draws routes on the floor:
+/// - a flat ribbon with moving chevrons that point the way,
+/// - a start disc while recording,
+/// - a destination pin with a label while guiding.
+/// Everything is parented to the marker origin, so drift corrections move it too.
 /// </summary>
 public class ARPathRenderer : MonoBehaviour
 {
-    [Header("Line Appearance")]
-    [Tooltip("Width of the path ribbon on the floor in meters.")]
-    public float lineWidth = 0.45f;
+    private static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
+    private static readonly int ColorId = Shader.PropertyToID("_Color");
 
-    [Tooltip("Primary glowing emerald color.")]
-    public Color pathColor = new Color(0.12f, 0.95f, 0.45f, 0.85f);
+    [Header("References")]
+    public AnchorTracker anchorTracker;
 
-    [Tooltip("Height offset above floor in meters to prevent z-fighting.")]
-    public float floorOffset = 0.03f;
+    [Tooltip("Transparent, double-sided URP Unlit material for the ribbon. Created at runtime if empty.")]
+    public Material routeMaterial;
 
-    [Header("Anchor & Marker Appearance")]
-    public Color anchorColor = new Color(0.1f, 0.75f, 1f, 0.95f); // Cyan for anchor dots
-    public Color destinationColor = new Color(1f, 0.28f, 0.28f, 0.98f); // Coral red for destination
-    public Color startColor = new Color(0.2f, 0.95f, 0.4f, 0.98f);
+    [Tooltip("URP Unlit material for markers; tinted per marker. Created at runtime if empty.")]
+    public Material markerMaterial;
 
-    [Header("World Anchor Root")]
-    public Transform worldAnchorRoot;
+    [Header("Ribbon")]
+    public float lineWidth = 0.4f;
+    public Color pathColor = new Color(0.12f, 0.95f, 0.45f, 0.9f);
+    public Color recordingColor = new Color(0.1f, 0.75f, 1f, 0.9f);
 
-    private LineRenderer lineRenderer;
-    private Material lineMaterial;
-    private readonly List<GameObject> anchorMarkers = new List<GameObject>();
+    [Tooltip("Height above the floor (metres) to avoid flicker against the camera image.")]
+    public float floorOffset = 0.02f;
+
+    [Tooltip("Chevron scroll speed (tiles per second).")]
+    public float flowSpeed = 0.8f;
+
+    [Header("Markers")]
+    public Color startColor = new Color(0.2f, 0.95f, 0.4f, 1f);
+    public Color destinationColor = new Color(1f, 0.3f, 0.3f, 1f);
+
+    [Header("Recording")]
+    public Color pointColor = new Color(0.1f, 0.75f, 1f, 1f);
+    public Color reticleReadyColor = new Color(0.2f, 1f, 0.5f, 1f);
+    public Color reticleBlockedColor = new Color(0.6f, 0.6f, 0.6f, 1f);
+
+    private LineRenderer line;
+    private Transform lineTransform;
+    private readonly List<Vector2> lineBuffer = new List<Vector2>();
+    private Vector3[] positionBuffer = new Vector3[0];
+    private readonly List<GameObject> pointDots = new List<GameObject>();
+    private GameObject reticle;
+    private MeshRenderer reticleRenderer;
+    private bool? reticleColorReady;
     private GameObject startMarker;
     private GameObject destinationMarker;
+    private Transform destinationBeacon;
+    private MaterialPropertyBlock propertyBlock;
+    private Texture2D chevronTexture;
+    private bool ownsRouteMaterial;
+    private bool ownsMarkerMaterial;
+
+    // Points are stored with y up; the ribbon's transform has its Z axis pointing up,
+    // so local points are rotated into its frame.
+    private static readonly Quaternion OriginToLine = Quaternion.Euler(90f, 0f, 0f);
 
     void Awake()
     {
-        EnsureWorldAnchorRoot();
-        SetupLineRenderer();
+        if (anchorTracker == null) anchorTracker = FindAnyObjectByType<AnchorTracker>();
+        propertyBlock = new MaterialPropertyBlock();
+        EnsureMaterials();
     }
 
-    public void EnsureWorldAnchorRoot()
+    void OnDestroy()
     {
-        if (worldAnchorRoot == null)
+        if (ownsRouteMaterial && routeMaterial != null) Destroy(routeMaterial);
+        if (ownsMarkerMaterial && markerMaterial != null) Destroy(markerMaterial);
+        if (chevronTexture != null) Destroy(chevronTexture);
+        if (lineTransform != null) Destroy(lineTransform.gameObject);
+        ClearMarkers();
+    }
+
+    void Update()
+    {
+        if (line != null && line.enabled && routeMaterial != null)
         {
-            AnchorTracker tracker = FindFirstObjectByType<AnchorTracker>();
-            if (tracker != null && tracker.StabilizedOrigin != null)
-            {
-                worldAnchorRoot = tracker.StabilizedOrigin;
-            }
-            else
-            {
-                GameObject rootGO = GameObject.Find("Calibrated_World_Origin");
-                if (rootGO == null) rootGO = new GameObject("Calibrated_World_Origin");
-                worldAnchorRoot = rootGO.transform;
-                worldAnchorRoot.SetParent(null, true);
-            }
-        }
-    }
-
-    public void SetOriginPose(Vector3 worldPos, Quaternion worldRot)
-    {
-        EnsureWorldAnchorRoot();
-        worldAnchorRoot.position = worldPos;
-        worldAnchorRoot.rotation = worldRot;
-        Debug.Log($"[ARPathRenderer] World Anchor locked at {worldPos}");
-    }
-
-    private void SetupLineRenderer()
-    {
-        EnsureWorldAnchorRoot();
-
-        if (lineRenderer == null)
-        {
-            lineRenderer = worldAnchorRoot.GetComponent<LineRenderer>();
-            if (lineRenderer == null)
-            {
-                lineRenderer = worldAnchorRoot.gameObject.AddComponent<LineRenderer>();
-            }
+            routeMaterial.mainTextureOffset = new Vector2(-Time.time * flowSpeed, 0f);
         }
 
-        lineRenderer.useWorldSpace = false; // Local to worldAnchorRoot!
-        lineRenderer.startWidth = lineWidth;
-        lineRenderer.endWidth = lineWidth;
-        lineRenderer.numCornerVertices = 8;
-        lineRenderer.numCapVertices = 8;
-        lineRenderer.alignment = LineAlignment.View;
-        lineRenderer.textureMode = LineTextureMode.Tile;
-        lineRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-        lineRenderer.receiveShadows = false;
-        lineRenderer.enabled = false;
-
-        lineMaterial = CreateGlowingMaterial(pathColor);
-        lineRenderer.material = lineMaterial;
-        lineRenderer.startColor = pathColor;
-        lineRenderer.endColor = pathColor;
+        if (destinationBeacon != null)
+        {
+            destinationBeacon.localPosition = new Vector3(0f, 0.8f + Mathf.Sin(Time.time * 2.5f) * 0.04f, 0f);
+            destinationBeacon.Rotate(0f, 90f * Time.deltaTime, 0f, Space.World);
+        }
     }
 
     /// <summary>
-    /// Renders the path for 'Guide Me' mode (smooth Catmull-Rom spline, NO anchor dots).
+    /// Live preview while recording: a dot per placed point, the line through them,
+    /// and an aiming ring on the floor with a preview segment to it.
+    /// Cheap enough to call every frame.
     /// </summary>
-    public void RenderGuidedPath(PathData pathData)
+    public void RenderRecording(IReadOnlyList<Vector2> points, float floorY, Vector2? aim, bool canPlace)
     {
-        ClearAll();
-        if (pathData == null || pathData.waypoints == null || pathData.waypoints.Count == 0) return;
+        RemoveDestinationMarker();
 
-        EnsureWorldAnchorRoot();
-        if (lineRenderer == null) SetupLineRenderer();
+        int count = points != null ? points.Count : 0;
+        lineBuffer.Clear();
+        for (int i = 0; i < count; i++) lineBuffer.Add(points[i]);
+        if (aim.HasValue && count > 0) lineBuffer.Add(aim.Value);
 
-        List<Vector3> rawPoints = new List<Vector3>();
-        for (int i = 0; i < pathData.waypoints.Count; i++)
-        {
-            Vector3 pos = pathData.waypoints[i].GetPosition();
-            pos.y += floorOffset;
-            rawPoints.Add(pos);
-        }
+        if (lineBuffer.Count >= 2) SetLine(lineBuffer, floorY, recordingColor);
+        else if (line != null) line.enabled = false;
 
-        if (rawPoints.Count >= 2)
-        {
-            // Smooth spline interpolation for fluid, curved visual path
-            List<Vector3> smoothPoints = SplineMath.GenerateSmoothPath(rawPoints, pointsPerSegment: 8);
-            lineRenderer.positionCount = smoothPoints.Count;
-            lineRenderer.SetPositions(smoothPoints.ToArray());
-            lineRenderer.enabled = true;
-        }
-        else
-        {
-            lineRenderer.positionCount = 0;
-            lineRenderer.enabled = false;
-        }
+        if (count > 0) EnsureStartMarker(points[0], floorY);
+        else RemoveStartMarker();
 
-        // Start marker at (0, 0, 0)
-        CreateStartMarker(rawPoints[0]);
-
-        // Destination Stop Marker at end
-        CreateDestinationMarker(rawPoints[rawPoints.Count - 1], pathData.destinationName);
+        SyncPointDots(points, floorY);
+        UpdateReticle(aim, floorY, canPlace);
     }
 
-    /// <summary>
-    /// Updates live visuals during recording: shows smooth path line + anchor spheres at each turn.
-    /// </summary>
-    public void UpdateRecordingVisuals(List<Vector3> localPoints, string destinationName)
+    /// <summary>Guidance: the route still ahead of the user and the destination pin.</summary>
+    public void RenderGuide(IReadOnlyList<Vector2> remainingPoints, Vector2 destination, string destinationName, float floorY)
     {
-        if (localPoints == null || localPoints.Count == 0)
+        if (remainingPoints == null || remainingPoints.Count == 0)
         {
             ClearAll();
             return;
         }
 
-        EnsureWorldAnchorRoot();
-        if (lineRenderer == null) SetupLineRenderer();
-
-        List<Vector3> points = new List<Vector3>();
-        for (int i = 0; i < localPoints.Count; i++)
-        {
-            Vector3 pos = localPoints[i];
-            pos.y += floorOffset;
-            points.Add(pos);
-        }
-
-        if (points.Count >= 2)
-        {
-            List<Vector3> smoothPoints = SplineMath.GenerateSmoothPath(points, pointsPerSegment: 6);
-            lineRenderer.positionCount = smoothPoints.Count;
-            lineRenderer.SetPositions(smoothPoints.ToArray());
-            lineRenderer.enabled = true;
-        }
-        else
-        {
-            lineRenderer.positionCount = 0;
-            lineRenderer.enabled = false;
-        }
-
-        // Ensure Start Marker
-        if (startMarker == null && points.Count > 0)
-        {
-            CreateStartMarker(points[0]);
-        }
-
-        // Rebuild anchor dots (turns)
-        ClearAnchorMarkers();
-        for (int i = 1; i < points.Count; i++)
-        {
-            CreateAnchorDot(points[i], i);
-        }
-    }
-
-    public void CreateStartMarker(Vector3 localPos)
-    {
-        EnsureWorldAnchorRoot();
-        if (startMarker != null) Destroy(startMarker);
-
-        startMarker = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-        startMarker.name = "StartMarker_Origin";
-        startMarker.transform.SetParent(worldAnchorRoot, false);
-        startMarker.transform.localPosition = localPos;
-        startMarker.transform.localScale = new Vector3(0.40f, 0.015f, 0.40f);
-        DestroyCollider(startMarker);
-
-        startMarker.GetComponent<Renderer>().sharedMaterial = CreateGlowingMaterial(startColor);
-        Create3DText("START", startMarker.transform, new Vector3(0, 0.20f, 0), Color.white, 0.022f);
-    }
-
-    public void CreateAnchorDot(Vector3 localPos, int index)
-    {
-        EnsureWorldAnchorRoot();
-        GameObject dot = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-        dot.name = $"AnchorDot_{index}";
-        dot.transform.SetParent(worldAnchorRoot, false);
-        dot.transform.localPosition = localPos + new Vector3(0, 0.06f, 0);
-        dot.transform.localScale = new Vector3(0.14f, 0.14f, 0.14f);
-        DestroyCollider(dot);
-
-        dot.GetComponent<Renderer>().sharedMaterial = CreateGlowingMaterial(anchorColor);
-        anchorMarkers.Add(dot);
-    }
-
-    public void CreateDestinationMarker(Vector3 localPos, string destName)
-    {
-        EnsureWorldAnchorRoot();
-        if (destinationMarker != null) Destroy(destinationMarker);
-
-        destinationMarker = new GameObject("DestinationStopMarker");
-        destinationMarker.transform.SetParent(worldAnchorRoot, false);
-        destinationMarker.transform.localPosition = localPos;
-
-        // 1. Pedestal Base Ring
-        GameObject pedestal = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-        pedestal.name = "Pedestal";
-        pedestal.transform.SetParent(destinationMarker.transform, false);
-        pedestal.transform.localPosition = Vector3.zero;
-        pedestal.transform.localScale = new Vector3(0.50f, 0.02f, 0.50f);
-        DestroyCollider(pedestal);
-        pedestal.GetComponent<Renderer>().sharedMaterial = CreateGlowingMaterial(destinationColor);
-
-        // 2. Vertical Pin Pole
-        GameObject pole = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-        pole.name = "Pole";
-        pole.transform.SetParent(destinationMarker.transform, false);
-        pole.transform.localPosition = new Vector3(0, 0.35f, 0);
-        pole.transform.localScale = new Vector3(0.035f, 0.35f, 0.035f);
-        DestroyCollider(pole);
-        pole.GetComponent<Renderer>().sharedMaterial = CreateGlowingMaterial(Color.white);
-
-        // 3. Floating Stop Beacon Diamond
-        GameObject beacon = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        beacon.name = "Beacon";
-        beacon.transform.SetParent(destinationMarker.transform, false);
-        beacon.transform.localPosition = new Vector3(0, 0.75f, 0);
-        beacon.transform.localRotation = Quaternion.Euler(45, 45, 45);
-        beacon.transform.localScale = new Vector3(0.18f, 0.18f, 0.18f);
-        DestroyCollider(beacon);
-        beacon.GetComponent<Renderer>().sharedMaterial = CreateGlowingMaterial(destinationColor);
-
-        // 4. Billboard 3D Destination Banner
-        string label = string.IsNullOrEmpty(destName) ? "DESTINATION" : destName.ToUpper();
-        Create3DText(label, destinationMarker.transform, new Vector3(0, 0.95f, 0), Color.white, 0.025f, billboard: true);
-    }
-
-    private void Create3DText(string text, Transform parent, Vector3 localPos, Color color, float scale, bool billboard = false)
-    {
-        GameObject textGO = new GameObject("Text3D");
-        textGO.transform.SetParent(parent, false);
-        textGO.transform.localPosition = localPos;
-        textGO.transform.localRotation = Quaternion.identity;
-        textGO.transform.localScale = Vector3.one * scale;
-
-        TextMesh tm = textGO.AddComponent<TextMesh>();
-        tm.text = text;
-        tm.fontSize = 44;
-        tm.fontStyle = FontStyle.Bold;
-        tm.alignment = TextAlignment.Center;
-        tm.anchor = TextAnchor.MiddleCenter;
-        tm.color = color;
-
-        if (billboard)
-        {
-            textGO.AddComponent<BillboardLookAt>();
-        }
-    }
-
-    private void DestroyCollider(GameObject go)
-    {
-        Collider col = go.GetComponent<Collider>();
-        if (col != null)
-        {
-            if (Application.isPlaying) Destroy(col);
-            else DestroyImmediate(col);
-        }
+        SetLine(remainingPoints, floorY, pathColor);
+        RemoveStartMarker();
+        RemoveRecordingVisuals();
+        EnsureDestinationMarker(destination, floorY, destinationName);
     }
 
     public void ClearAll()
     {
-        if (lineRenderer != null)
+        if (line != null)
         {
-            lineRenderer.positionCount = 0;
-            lineRenderer.enabled = false;
+            line.positionCount = 0;
+            line.enabled = false;
         }
-
-        ClearAnchorMarkers();
-
-        if (startMarker != null)
-        {
-            Destroy(startMarker);
-            startMarker = null;
-        }
-
-        if (destinationMarker != null)
-        {
-            Destroy(destinationMarker);
-            destinationMarker = null;
-        }
+        ClearMarkers();
     }
 
-    public void ClearAnchorMarkers()
+    private void SetLine(IReadOnlyList<Vector2> points, float floorY, Color color)
     {
-        foreach (var m in anchorMarkers)
+        if (!EnsureLine()) return;
+
+        if (points.Count < 2)
         {
-            if (m != null) Destroy(m);
+            line.positionCount = 0;
+            line.enabled = false;
+            return;
         }
-        anchorMarkers.Clear();
+
+        if (positionBuffer.Length != points.Count) positionBuffer = new Vector3[points.Count];
+        for (int i = 0; i < points.Count; i++)
+        {
+            positionBuffer[i] = OriginToLine * new Vector3(points[i].x, floorY + floorOffset, points[i].y);
+        }
+
+        line.positionCount = points.Count;
+        line.SetPositions(positionBuffer);
+
+        // URP Unlit ignores vertex colours, so tint through a property block.
+        propertyBlock.Clear();
+        propertyBlock.SetColor(BaseColorId, color);
+        propertyBlock.SetColor(ColorId, color);
+        line.SetPropertyBlock(propertyBlock);
+        line.enabled = true;
     }
 
-    private Material CreateGlowingMaterial(Color col)
+    private bool EnsureLine()
+    {
+        if (line != null) return true;
+
+        Transform origin = Origin;
+        if (origin == null) return false;
+
+        var go = new GameObject("RouteLine");
+        lineTransform = go.transform;
+        lineTransform.SetParent(origin, false);
+        lineTransform.localPosition = Vector3.zero;
+        lineTransform.localRotation = Quaternion.Inverse(OriginToLine);
+
+        line = go.AddComponent<LineRenderer>();
+        line.useWorldSpace = false;
+        line.alignment = LineAlignment.TransformZ; // Lie flat on the floor.
+        line.widthMultiplier = lineWidth;
+        line.numCornerVertices = 6;
+        line.numCapVertices = 4;
+        line.textureMode = LineTextureMode.Tile;
+        line.textureScale = new Vector2(1f / lineWidth, 1f); // One chevron per ribbon width.
+        line.shadowCastingMode = ShadowCastingMode.Off;
+        line.receiveShadows = false;
+        line.sharedMaterial = routeMaterial;
+        line.enabled = false;
+        return true;
+    }
+
+    private void EnsureStartMarker(Vector2 position, float floorY)
+    {
+        Transform origin = Origin;
+        if (origin == null) return;
+
+        if (startMarker == null)
+        {
+            startMarker = new GameObject("StartMarker");
+            startMarker.transform.SetParent(origin, false);
+
+            CreatePart(PrimitiveType.Cylinder, startMarker.transform, Vector3.zero, new Vector3(0.45f, 0.01f, 0.45f), startColor);
+            CreateLabel("START", startMarker.transform, new Vector3(0f, 0.25f, 0f), 0.6f);
+        }
+        startMarker.transform.localPosition = new Vector3(position.x, floorY + floorOffset, position.y);
+    }
+
+    private void EnsureDestinationMarker(Vector2 position, float floorY, string destinationName)
+    {
+        Transform origin = Origin;
+        if (origin == null) return;
+
+        if (destinationMarker == null)
+        {
+            destinationMarker = new GameObject("DestinationMarker");
+            destinationMarker.transform.SetParent(origin, false);
+
+            CreatePart(PrimitiveType.Cylinder, destinationMarker.transform, Vector3.zero, new Vector3(0.6f, 0.01f, 0.6f), destinationColor);
+            CreatePart(PrimitiveType.Cylinder, destinationMarker.transform, new Vector3(0f, 0.35f, 0f), new Vector3(0.03f, 0.35f, 0.03f), Color.white);
+            destinationBeacon = CreatePart(PrimitiveType.Sphere, destinationMarker.transform, new Vector3(0f, 0.8f, 0f), Vector3.one * 0.16f, destinationColor).transform;
+
+            string label = string.IsNullOrEmpty(destinationName) ? "DESTINATION" : destinationName.ToUpperInvariant();
+            CreateLabel(label, destinationMarker.transform, new Vector3(0f, 1.1f, 0f), 0.9f);
+        }
+        destinationMarker.transform.localPosition = new Vector3(position.x, floorY + floorOffset, position.y);
+    }
+
+    private GameObject CreatePart(PrimitiveType type, Transform parent, Vector3 localPosition, Vector3 localScale, Color color)
+    {
+        // Not GameObject.CreatePrimitive: it adds a collider, and engine code
+        // stripping removes collider classes from builds that never use physics.
+        var part = new GameObject(type.ToString());
+        part.AddComponent<MeshFilter>().sharedMesh = PrimitiveMesh(type);
+        part.transform.SetParent(parent, false);
+        part.transform.localPosition = localPosition;
+        part.transform.localScale = localScale;
+
+        var meshRenderer = part.AddComponent<MeshRenderer>();
+        meshRenderer.sharedMaterial = markerMaterial;
+        meshRenderer.shadowCastingMode = ShadowCastingMode.Off;
+        meshRenderer.receiveShadows = false;
+
+        propertyBlock.Clear();
+        propertyBlock.SetColor(BaseColorId, color);
+        propertyBlock.SetColor(ColorId, color);
+        meshRenderer.SetPropertyBlock(propertyBlock);
+        return part;
+    }
+
+    private static readonly Dictionary<PrimitiveType, Mesh> PrimitiveMeshes = new Dictionary<PrimitiveType, Mesh>();
+
+    /// <summary>The built-in meshes that GameObject.CreatePrimitive uses.</summary>
+    private static Mesh PrimitiveMesh(PrimitiveType type)
+    {
+        if (PrimitiveMeshes.TryGetValue(type, out Mesh mesh) && mesh != null) return mesh;
+
+        string resource = type == PrimitiveType.Sphere ? "New-Sphere.fbx" : "New-Cylinder.fbx";
+        mesh = Resources.GetBuiltinResource<Mesh>(resource);
+        PrimitiveMeshes[type] = mesh;
+        return mesh;
+    }
+
+    private void CreateLabel(string text, Transform parent, Vector3 localPosition, float fontSize)
+    {
+        var go = new GameObject("Label");
+        go.transform.SetParent(parent, false);
+        go.transform.localPosition = localPosition;
+
+        var tmp = go.AddComponent<TextMeshPro>();
+        tmp.text = text;
+        tmp.fontSize = fontSize;
+        tmp.fontStyle = FontStyles.Bold;
+        tmp.alignment = TextAlignmentOptions.Center;
+        tmp.color = Color.white;
+        tmp.outlineWidth = 0.2f;
+        tmp.outlineColor = new Color32(0, 0, 0, 200);
+        tmp.rectTransform.sizeDelta = new Vector2(4f, 1f);
+        tmp.textWrappingMode = TextWrappingModes.NoWrap;
+
+        go.AddComponent<BillboardLookAt>();
+    }
+
+    private void SyncPointDots(IReadOnlyList<Vector2> points, float floorY)
+    {
+        Transform origin = Origin;
+        int count = points != null ? points.Count : 0;
+
+        while (pointDots.Count > count)
+        {
+            int last = pointDots.Count - 1;
+            if (pointDots[last] != null) Destroy(pointDots[last]);
+            pointDots.RemoveAt(last);
+        }
+        while (pointDots.Count < count && origin != null)
+        {
+            var dot = CreatePart(PrimitiveType.Sphere, origin, Vector3.zero, Vector3.one * 0.12f, pointColor);
+            dot.name = "RoutePoint_" + (pointDots.Count + 1);
+            pointDots.Add(dot);
+        }
+        for (int i = 0; i < pointDots.Count; i++)
+        {
+            if (pointDots[i] != null) pointDots[i].transform.localPosition = new Vector3(points[i].x, floorY + 0.06f, points[i].y);
+        }
+    }
+
+    private void UpdateReticle(Vector2? aim, float floorY, bool canPlace)
+    {
+        Transform origin = Origin;
+        if (!aim.HasValue || origin == null)
+        {
+            if (reticle != null) reticle.SetActive(false);
+            return;
+        }
+
+        if (reticle == null)
+        {
+            reticle = CreatePart(PrimitiveType.Cylinder, origin, Vector3.zero, new Vector3(0.3f, 0.004f, 0.3f), reticleReadyColor);
+            reticle.name = "AimReticle";
+            reticleRenderer = reticle.GetComponent<MeshRenderer>();
+            reticleColorReady = true;
+        }
+
+        if (reticleColorReady != canPlace)
+        {
+            reticleColorReady = canPlace;
+            propertyBlock.Clear();
+            Color color = canPlace ? reticleReadyColor : reticleBlockedColor;
+            propertyBlock.SetColor(BaseColorId, color);
+            propertyBlock.SetColor(ColorId, color);
+            reticleRenderer.SetPropertyBlock(propertyBlock);
+        }
+
+        reticle.SetActive(true);
+        reticle.transform.localPosition = new Vector3(aim.Value.x, floorY + floorOffset, aim.Value.y);
+    }
+
+    private void RemoveRecordingVisuals()
+    {
+        foreach (GameObject dot in pointDots)
+        {
+            if (dot != null) Destroy(dot);
+        }
+        pointDots.Clear();
+        if (reticle != null) Destroy(reticle);
+        reticle = null;
+        reticleRenderer = null;
+        reticleColorReady = null;
+    }
+
+    private void RemoveStartMarker()
+    {
+        if (startMarker != null) Destroy(startMarker);
+        startMarker = null;
+    }
+
+    private void RemoveDestinationMarker()
+    {
+        if (destinationMarker != null) Destroy(destinationMarker);
+        destinationMarker = null;
+        destinationBeacon = null;
+    }
+
+    private void ClearMarkers()
+    {
+        RemoveStartMarker();
+        RemoveDestinationMarker();
+        RemoveRecordingVisuals();
+    }
+
+    private Transform Origin => anchorTracker != null ? anchorTracker.StabilizedOrigin : null;
+
+    private void EnsureMaterials()
+    {
+        if (routeMaterial == null)
+        {
+            routeMaterial = CreateUnlitMaterial(transparent: true, doubleSided: true);
+            ownsRouteMaterial = routeMaterial != null;
+        }
+        else
+        {
+            // Never animate the shared asset itself.
+            routeMaterial = new Material(routeMaterial);
+            ownsRouteMaterial = true;
+        }
+
+        if (routeMaterial != null)
+        {
+            chevronTexture = CreateChevronTexture();
+            routeMaterial.mainTexture = chevronTexture;
+        }
+
+        if (markerMaterial == null)
+        {
+            markerMaterial = CreateUnlitMaterial(transparent: false, doubleSided: false);
+            ownsMarkerMaterial = markerMaterial != null;
+        }
+    }
+
+    private static Material CreateUnlitMaterial(bool transparent, bool doubleSided)
     {
         Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
         if (shader == null) shader = Shader.Find("Sprites/Default");
-        if (shader == null) shader = Shader.Find("Unlit/Color");
-        if (shader == null) shader = Shader.Find("Standard");
-
-        Material mat = new Material(shader);
-        mat.color = col;
-
-        // Setup transparency & glow
-        mat.SetFloat("_Surface", 1);
-        mat.SetFloat("_Blend", 0);
-        mat.SetOverrideTag("RenderType", "Transparent");
-        mat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
-        mat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
-        mat.SetInt("_ZWrite", 0);
-        mat.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
-
-        if (mat.HasProperty("_EmissionColor"))
+        if (shader == null)
         {
-            mat.EnableKeyword("_EMISSION");
-            mat.SetColor("_EmissionColor", col * 1.4f);
+            AppLog.Error("ARPathRenderer", "No unlit shader found. Assign route/marker materials in the inspector.");
+            return null;
         }
 
+        var mat = new Material(shader);
+        ConfigureUnlit(mat, transparent, doubleSided);
         return mat;
+    }
+
+    /// <summary>Sets up a URP Unlit material. Shared with the editor scene builder.</summary>
+    public static void ConfigureUnlit(Material mat, bool transparent, bool doubleSided)
+    {
+        if (mat.HasProperty("_Cull")) mat.SetFloat("_Cull", doubleSided ? (float)CullMode.Off : (float)CullMode.Back);
+        if (!transparent) return;
+
+        mat.SetFloat("_Surface", 1f);
+        mat.SetFloat("_Blend", 0f);
+        mat.SetFloat("_SrcBlend", (float)BlendMode.SrcAlpha);
+        mat.SetFloat("_DstBlend", (float)BlendMode.OneMinusSrcAlpha);
+        if (mat.HasProperty("_SrcBlendAlpha")) mat.SetFloat("_SrcBlendAlpha", (float)BlendMode.One);
+        if (mat.HasProperty("_DstBlendAlpha")) mat.SetFloat("_DstBlendAlpha", (float)BlendMode.OneMinusSrcAlpha);
+        mat.SetFloat("_ZWrite", 0f);
+        mat.SetOverrideTag("RenderType", "Transparent");
+        mat.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
+        mat.renderQueue = (int)RenderQueue.Transparent;
+    }
+
+    /// <summary>Ribbon texture: a soft fill with one chevron pointing along the route.</summary>
+    private static Texture2D CreateChevronTexture()
+    {
+        const int size = 64;
+        var tex = new Texture2D(size, size, TextureFormat.RGBA32, false)
+        {
+            wrapMode = TextureWrapMode.Repeat,
+            filterMode = FilterMode.Bilinear,
+            name = "RouteChevron"
+        };
+
+        var pixels = new Color32[size * size];
+        for (int y = 0; y < size; y++)
+        {
+            float v = (y + 0.5f) / size;              // Across the ribbon.
+            float across = Mathf.Abs(v - 0.5f) * 2f;  // 0 at centre, 1 at edges.
+            for (int x = 0; x < size; x++)
+            {
+                float u = (x + 0.5f) / size;          // Along the ribbon.
+                float chevronU = 0.65f - 0.35f * across;
+                float chevron = Mathf.Clamp01(1f - Mathf.Abs(u - chevronU) / 0.09f) * (across < 0.8f ? 1f : 0f);
+                float edge = Mathf.Clamp01((1f - across) / 0.15f);
+                float alpha = Mathf.Max(0.35f, chevron) * edge;
+                byte a = (byte)(alpha * 255f);
+                pixels[y * size + x] = new Color32(255, 255, 255, a);
+            }
+        }
+        tex.SetPixels32(pixels);
+        tex.Apply(false, true);
+        return tex;
     }
 }

@@ -5,13 +5,19 @@ public class SplashScreen : MonoBehaviour
     public float displayTime = 2.2f;
     public UIManager uiManager;
 
-    void Start()
+    void OnEnable()
     {
+        CancelInvoke(nameof(GoNext));
         Invoke(nameof(GoNext), displayTime);
+    }
+
+    void OnDisable()
+    {
+        CancelInvoke(nameof(GoNext));
     }
 
     void GoNext()
     {
-        uiManager.GoToLogin();
+        if (uiManager != null) uiManager.OnSplashFinished();
     }
 }

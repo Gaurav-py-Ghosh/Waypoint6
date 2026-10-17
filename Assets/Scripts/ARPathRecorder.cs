@@ -2,255 +2,257 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 
+public enum RecorderState
+{
+    Idle,
+    WaitingForMarker,
+    Ready,
+    Recording
+}
+
 /// <summary>
-/// Handles live AR recording of a physical campus path using AnchorTracker:
-/// - Screen-center floor raycast projects anchors cleanly onto the hallway floor.
-/// - Supports both wall-mounted and floor-mounted calibration targets.
-/// - Calibrated origin remains 100% frozen; waypoints are stored in anchor-local coordinates.
+/// Records a route from points the user places on the floor: aim the ring at the
+/// floor and drop a point, or tap the floor on screen. The route is the line
+/// through the points, in the marker origin's gravity-aligned frame.
 /// </summary>
 public class ARPathRecorder : MonoBehaviour
 {
-    public enum RecordingProjectionMode
-    {
-        CenterScreenFloorRaycast,
-        CameraFootprint
-    }
+    private const string Tag = "ARPathRecorder";
 
     [Header("References")]
-    [Tooltip("The Vuforia ARCamera representing the user's position.")]
+    [Tooltip("The Vuforia ARCamera. Defaults to Camera.main.")]
     public Transform arCamera;
-
-    [Tooltip("The AnchorTracker managing the stabilized world origin.")]
     public AnchorTracker anchorTracker;
-
-    [Tooltip("The path renderer for live visualization.")]
     public ARPathRenderer pathRenderer;
+    public FloorEstimator floorEstimator;
+    public TrackingQualityMonitor trackingMonitor;
 
-    [Header("Floor Projection Settings")]
-    public RecordingProjectionMode projectionMode = RecordingProjectionMode.CenterScreenFloorRaycast;
+    [Header("Placement")]
+    [Tooltip("Points can be placed on the floor between these distances from the phone (metres).")]
+    [SerializeField] private Vector2 placementRange = new Vector2(0.3f, 8f);
 
-    [Tooltip("Estimated eye level height from floor in meters (used to locate ground plane).")]
-    public float userCameraHeight = 1.4f;
+    [Tooltip("The aim must point at least this far below the horizon (degrees); far, flat hits are inaccurate.")]
+    [SerializeField] private float minDownAngle = 8f;
 
-    [Header("Current Recording State")]
-    public bool isRecording = false;
-    public bool isCalibrated = false;
-    public string currentDestination = "";
+    [Tooltip("Points closer than this to the previous point are rejected (metres).")]
+    [SerializeField] private float minPointSpacing = 0.3f;
 
-    public event Action OnOriginLocked;
-    public event Action<int, float> OnAnchorAdded; // count, totalDistance
+    [Tooltip("Shortest route that can be saved (metres).")]
+    [SerializeField] private float minRouteLength = 2f;
 
-    private PathData currentPath;
-    private readonly List<Vector3> recordedLocalPoints = new List<Vector3>();
-    private float establishedFloorY = float.NaN;
+    [SerializeField] private int maxPoints = 500;
+
+    public RecorderState State { get; private set; } = RecorderState.Idle;
+    public string Destination { get; private set; } = "";
+    public float RecordedDistance { get; private set; }
+    public int PointCount => points.Count;
+
+    /// <summary>True when the centre of the screen is aimed at the floor this frame.</summary>
+    public bool HasAim { get; private set; }
+
+    public event Action OnStateChanged;
+
+    private readonly List<Vector2> points = new List<Vector2>();
+    private Camera cameraComponent;
+    private Vector2 aimPoint;
 
     void Awake()
     {
-        if (arCamera == null)
-        {
-            Camera cam = Camera.main;
-            if (cam != null) arCamera = cam.transform;
-        }
-
-        if (anchorTracker == null)
-        {
-            anchorTracker = FindFirstObjectByType<AnchorTracker>();
-        }
-
-        if (pathRenderer == null)
-        {
-            pathRenderer = FindFirstObjectByType<ARPathRenderer>();
-        }
+        if (arCamera == null && Camera.main != null) arCamera = Camera.main.transform;
+        if (anchorTracker == null) anchorTracker = FindAnyObjectByType<AnchorTracker>();
+        if (pathRenderer == null) pathRenderer = FindAnyObjectByType<ARPathRenderer>();
+        if (floorEstimator == null) floorEstimator = FindAnyObjectByType<FloorEstimator>();
+        if (trackingMonitor == null) trackingMonitor = FindAnyObjectByType<TrackingQualityMonitor>();
+        if (arCamera != null) cameraComponent = arCamera.GetComponent<Camera>();
     }
 
-    void Start()
+    void OnEnable()
     {
-        if (anchorTracker != null)
-        {
-            anchorTracker.OnOriginCalibrated += HandleOriginCalibrated;
-            anchorTracker.OnOriginRecalibrated += HandleOriginCalibrated;
-        }
+        if (anchorTracker != null) anchorTracker.OnOriginCalibrated += HandleCalibrated;
     }
 
-    void OnDestroy()
+    void OnDisable()
     {
-        if (anchorTracker != null)
-        {
-            anchorTracker.OnOriginCalibrated -= HandleOriginCalibrated;
-            anchorTracker.OnOriginRecalibrated -= HandleOriginCalibrated;
-        }
+        if (anchorTracker != null) anchorTracker.OnOriginCalibrated -= HandleCalibrated;
     }
 
-    private void HandleOriginCalibrated()
+    /// <summary>Enters recording mode. The marker must be scanned before points can be placed.</summary>
+    public void Begin(string destination)
     {
-        if (isRecording && !isCalibrated)
-        {
-            CalibrateOriginInternal();
-        }
+        Destination = destination;
+        points.Clear();
+        RecordedDistance = 0f;
+        if (pathRenderer != null) pathRenderer.ClearAll();
+        if (floorEstimator != null) floorEstimator.ResetEstimate();
+
+        SetState(anchorTracker != null && anchorTracker.IsCalibrated ? RecorderState.Ready : RecorderState.WaitingForMarker);
     }
 
-    /// <summary>
-    /// Enters recording mode for a destination. Waits for target calibration if not already calibrated.
-    /// </summary>
-    public void StartRecording(string destinationName)
+    /// <summary>Places a point where the centre of the screen meets the floor.</summary>
+    public bool DropAtAim(out string error)
     {
-        currentDestination = destinationName;
-        isRecording = true;
-        isCalibrated = false;
-        establishedFloorY = float.NaN;
-        currentPath = new PathData(destinationName);
-        recordedLocalPoints.Clear();
-
-        if (pathRenderer != null)
+        if (!HasAim)
         {
-            pathRenderer.ClearAll();
+            error = "Aim the ring at the floor, 0.3–8 m in front of you.";
+            return false;
         }
-
-        if (anchorTracker != null && anchorTracker.IsCalibrated)
-        {
-            CalibrateOriginInternal();
-        }
-        else
-        {
-            Debug.Log($"[ARPathRecorder] Started recording '{destinationName}'. Waiting for compass target scan...");
-        }
+        return AddPoint(aimPoint, out error);
     }
 
-    public void CalibrateOrigin(Transform targetTransform)
+    /// <summary>Places a point where a screen position meets the floor (a tap).</summary>
+    public bool DropAtScreenPoint(Vector2 screenPosition, out string error)
     {
-        if (!isRecording || isCalibrated) return;
-        CalibrateOriginInternal();
+        if (!TryRaycastFloor(screenPosition, out Vector2 point))
+        {
+            error = "Tap on the floor, 0.3–8 m in front of you.";
+            return false;
+        }
+        return AddPoint(point, out error);
     }
 
-    private void CalibrateOriginInternal()
+    /// <summary>Removes the last point. Returns false when there is nothing to undo.</summary>
+    public bool Undo()
     {
-        isCalibrated = true;
-        OnOriginLocked?.Invoke();
-        Debug.Log($"[ARPathRecorder] Origin locked for '{currentDestination}'! Ready to drop start anchor on floor.");
+        if (State != RecorderState.Recording || points.Count == 0) return false;
+
+        points.RemoveAt(points.Count - 1);
+        RecordedDistance = PathMath.Length(points);
+        if (points.Count == 0) SetState(RecorderState.Ready);
+        else OnStateChanged?.Invoke();
+        return true;
     }
 
     /// <summary>
-    /// Projects screen-center raycast to the floor plane and drops an anchor.
-    /// Works whether target was scanned on a wall or floor.
+    /// Finishes and saves the route. Returns the saved route, or null with an
+    /// error message for the user.
     /// </summary>
-    public void DropAnchor()
+    public PathData Finish(out string error)
     {
-        if (!isRecording || !isCalibrated || arCamera == null || anchorTracker == null)
+        error = null;
+        if (State != RecorderState.Recording || points.Count < 2)
         {
-            Debug.LogWarning("[ARPathRecorder] Cannot drop anchor - not recording or not calibrated yet.");
-            return;
-        }
-
-        Camera cam = arCamera.GetComponent<Camera>();
-        if (cam == null) cam = Camera.main;
-
-        // Establish floor height:
-        if (float.IsNaN(establishedFloorY))
-        {
-            // Initial floor height estimated from camera eye-level
-            establishedFloorY = arCamera.position.y - userCameraHeight;
-        }
-
-        Vector3 worldFloorPos;
-
-        if (projectionMode == RecordingProjectionMode.CenterScreenFloorRaycast && cam != null)
-        {
-            Ray ray = cam.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0));
-            Plane floorPlane = new Plane(Vector3.up, new Vector3(0, establishedFloorY, 0));
-
-            if (floorPlane.Raycast(ray, out float enterDistance) && enterDistance > 0.2f && enterDistance < 30f)
-            {
-                worldFloorPos = ray.GetPoint(enterDistance);
-            }
-            else
-            {
-                // Fallback: 1.5m in front of camera at established floor height
-                Vector3 fwd = Vector3.ProjectOnPlane(arCamera.forward, Vector3.up).normalized;
-                worldFloorPos = new Vector3(arCamera.position.x, establishedFloorY, arCamera.position.z) + fwd * 1.5f;
-            }
-        }
-        else
-        {
-            // Camera Footprint fallback
-            worldFloorPos = new Vector3(arCamera.position.x, establishedFloorY, arCamera.position.z);
-        }
-
-        // Lock floor Y on first anchor so subsequent anchors are coplanar
-        if (recordedLocalPoints.Count == 0)
-        {
-            establishedFloorY = worldFloorPos.y;
-        }
-
-        // Convert world floor position into stabilized anchor-local space
-        Vector3 localPos = anchorTracker.InverseTransformPoint(worldFloorPos);
-        Quaternion localRot = Quaternion.Inverse(anchorTracker.StabilizedOrigin.rotation) * arCamera.rotation;
-
-        currentPath.AddWaypoint(localPos, localRot);
-        recordedLocalPoints.Add(localPos);
-        currentPath.CalculateTotalDistance();
-
-        if (pathRenderer != null)
-        {
-            pathRenderer.UpdateRecordingVisuals(recordedLocalPoints, currentDestination);
-        }
-
-        OnAnchorAdded?.Invoke(recordedLocalPoints.Count, currentPath.totalDistanceMeters);
-        Debug.Log($"[ARPathRecorder] Dropped anchor #{recordedLocalPoints.Count} at world {worldFloorPos} (local {localPos}) | Total: {currentPath.totalDistanceMeters:F1}m");
-    }
-
-    /// <summary>
-    /// Called when the user reaches the destination and taps 'FINISH & SAVE ROUTE'.
-    /// </summary>
-    public PathData FinishRecording()
-    {
-        if (!isRecording || !isCalibrated || currentPath == null || anchorTracker == null)
-        {
-            Debug.LogWarning("[ARPathRecorder] No active calibrated recording to finish.");
+            error = "Place at least two points: one at the start and one at the destination.";
             return null;
         }
 
-        if (recordedLocalPoints.Count == 0)
+        if (RecordedDistance < minRouteLength)
         {
-            Debug.LogWarning("[ARPathRecorder] Cannot finish recording - no anchors placed yet!");
+            error = $"Route is too short. It must be at least {minRouteLength:F0} m.";
             return null;
         }
 
-        currentPath.CalculateTotalDistance();
-
-        // Save to persistent JSON storage
-        PathStorageManager.SavePath(currentPath);
-
-        // Render destination stop marker at end
-        if (pathRenderer != null && recordedLocalPoints.Count > 0)
+        var data = new PathData(Destination, anchorTracker != null ? anchorTracker.Mount : MarkerMount.Floor)
         {
-            pathRenderer.UpdateRecordingVisuals(recordedLocalPoints, currentDestination);
-            pathRenderer.CreateDestinationMarker(recordedLocalPoints[recordedLocalPoints.Count - 1], currentDestination);
+            floorHeight = CurrentFloorY
+        };
+        data.SetPoints(points);
+
+        if (!PathStorageManager.SavePath(data))
+        {
+            error = "Could not save the route. Check free storage and try again.";
+            return null;
         }
 
-        isRecording = false;
-        Debug.Log($"[ARPathRecorder] Successfully saved route '{currentDestination}': {currentPath.totalDistanceMeters:F1}m across {recordedLocalPoints.Count} waypoints.");
-        return currentPath;
+        AppLog.Info(Tag, $"Saved '{Destination}': {data.totalDistanceMeters:F1} m, {points.Count} points.");
+        points.Clear();
+        HasAim = false;
+        SetState(RecorderState.Idle);
+        return data;
     }
 
-    public int WaypointCount => recordedLocalPoints.Count;
-    public float CurrentDistance => (currentPath != null) ? currentPath.totalDistanceMeters : 0f;
-
-    /// <summary>
-    /// Cancels recording without saving.
-    /// </summary>
-    public void CancelRecording()
+    public void Cancel()
     {
-        isRecording = false;
-        isCalibrated = false;
-        establishedFloorY = float.NaN;
-        currentPath = null;
-        recordedLocalPoints.Clear();
+        points.Clear();
+        RecordedDistance = 0f;
+        HasAim = false;
+        if (pathRenderer != null) pathRenderer.ClearAll();
+        if (State != RecorderState.Idle) AppLog.Info(Tag, "Recording cancelled.");
+        SetState(RecorderState.Idle);
+    }
+
+    void Update()
+    {
+        if (State != RecorderState.Ready && State != RecorderState.Recording) return;
+
+        HasAim = cameraComponent != null &&
+                 TryRaycastFloor(new Vector2(Screen.width * 0.5f, Screen.height * 0.5f), out aimPoint);
 
         if (pathRenderer != null)
         {
-            pathRenderer.ClearAll();
+            pathRenderer.RenderRecording(points, CurrentFloorY, HasAim ? aimPoint : (Vector2?)null, IsTrackingReliable());
+        }
+    }
+
+    private bool AddPoint(Vector2 point, out string error)
+    {
+        error = null;
+        if (State != RecorderState.Ready && State != RecorderState.Recording)
+        {
+            error = "Scan the marker first.";
+            return false;
+        }
+        if (!IsTrackingReliable())
+        {
+            error = "Tracking is weak. Hold still for a moment, then try again.";
+            return false;
+        }
+        if (points.Count >= maxPoints)
+        {
+            error = "This route has the maximum number of points.";
+            return false;
+        }
+        if (points.Count > 0 && Vector2.Distance(points[points.Count - 1], point) < minPointSpacing)
+        {
+            error = "Too close to the last point.";
+            return false;
         }
 
-        Debug.Log("[ARPathRecorder] Recording session cancelled.");
+        points.Add(point);
+        RecordedDistance = PathMath.Length(points);
+        AppLog.Info(Tag, $"Point {points.Count} placed ({RecordedDistance:F1} m).");
+
+        if (State == RecorderState.Ready) SetState(RecorderState.Recording);
+        else OnStateChanged?.Invoke();
+        return true;
+    }
+
+    /// <summary>Intersects a screen ray with the floor, returning the hit in the origin frame (x, z).</summary>
+    private bool TryRaycastFloor(Vector2 screenPosition, out Vector2 point)
+    {
+        point = Vector2.zero;
+        if (cameraComponent == null || anchorTracker == null || !anchorTracker.IsCalibrated) return false;
+
+        Transform origin = anchorTracker.StabilizedOrigin;
+        Ray ray = cameraComponent.ScreenPointToRay(screenPosition);
+
+        // Reject aims near or above the horizon: the hit would be far and unreliable.
+        if (Vector3.Dot(ray.direction, -origin.up) < Mathf.Sin(minDownAngle * Mathf.Deg2Rad)) return false;
+
+        var floor = new Plane(origin.up, origin.TransformPoint(new Vector3(0f, CurrentFloorY, 0f)));
+        if (!floor.Raycast(ray, out float distance)) return false;
+        if (distance < placementRange.x || distance > placementRange.y) return false;
+
+        Vector3 local = origin.InverseTransformPoint(ray.GetPoint(distance));
+        point = new Vector2(local.x, local.z);
+        return true;
+    }
+
+    private float CurrentFloorY => floorEstimator != null ? floorEstimator.LocalFloorY : 0f;
+
+    private bool IsTrackingReliable()
+    {
+        return trackingMonitor == null || trackingMonitor.IsReliable;
+    }
+
+    private void HandleCalibrated()
+    {
+        if (State == RecorderState.WaitingForMarker) SetState(RecorderState.Ready);
+    }
+
+    private void SetState(RecorderState state)
+    {
+        if (State == state) return;
+        State = state;
+        OnStateChanged?.Invoke();
     }
 }

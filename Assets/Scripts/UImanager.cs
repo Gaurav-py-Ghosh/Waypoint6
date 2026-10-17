@@ -1,15 +1,15 @@
+using System.Collections;
 using UnityEngine;
 
 /// <summary>
-/// Manages the auth/onboarding UI flow:
-///   Splash -> Login -> Mail Verify -> Hand off to CampusNavigationManager
-///
-/// This script only controls the splash, login, and verification screens.
-/// Once the user is authenticated (or skips login), it delegates to
-/// CampusNavigationManager for all campus navigation screens.
+/// Onboarding flow: Splash -> (already signed in? Main : Login) -> Main.
+/// Returning from the AR scene skips straight to Main.
+/// After onboarding, CampusNavigationManager runs the menu screens.
 /// </summary>
 public class UIManager : MonoBehaviour
 {
+    private const float MaxAuthWaitSeconds = 4f;
+
     public GameObject splashScreen;
     public GameObject loginScreen;
     public GameObject mailVerify;
@@ -18,18 +18,43 @@ public class UIManager : MonoBehaviour
     [Tooltip("The CampusNavigationManager that takes over after login.")]
     public CampusNavigationManager campusNavigationManager;
 
+    [Tooltip("Used to skip the login screen when a user is already signed in.")]
+    public GoogleAuthManager googleAuthManager;
+
+    void Awake()
+    {
+        if (googleAuthManager == null) googleAuthManager = GetComponent<GoogleAuthManager>();
+    }
+
     void Start()
     {
+        if (AppSession.OnboardingComplete)
+        {
+            GoToMain();
+            return;
+        }
         ShowOnly(splashScreen);
     }
 
-    void ShowOnly(GameObject screenToShow)
+    /// <summary>Called by SplashScreen when its display time is over.</summary>
+    public void OnSplashFinished()
     {
-        splashScreen.SetActive(false);
-        loginScreen.SetActive(false);
-        mailVerify.SetActive(false);
+        if (AppSession.OnboardingComplete) return;
+        StartCoroutine(ContinueAfterSplash());
+    }
 
-        screenToShow.SetActive(true);
+    private IEnumerator ContinueAfterSplash()
+    {
+        // Give Firebase a moment to restore a previous sign-in.
+        float deadline = Time.realtimeSinceStartup + MaxAuthWaitSeconds;
+        while (!FirebaseBootstrap.IsReady && !FirebaseBootstrap.IsFailed && Time.realtimeSinceStartup < deadline)
+        {
+            yield return null;
+        }
+        yield return null; // Let GoogleAuthManager pick up the Auth instance.
+
+        if (googleAuthManager != null && googleAuthManager.HasSignedInUser) GoToMain();
+        else GoToLogin();
     }
 
     public void GoToLogin()
@@ -42,27 +67,26 @@ public class UIManager : MonoBehaviour
         ShowOnly(mailVerify);
     }
 
-    /// <summary>
-    /// Called after successful login or skip.
-    /// Hides all auth screens and hands off to CampusNavigationManager.
-    /// </summary>
+    /// <summary>Called after successful login or skip. Hands off to CampusNavigationManager.</summary>
     public void GoToMain()
     {
-        // Hide all auth screens
-        splashScreen.SetActive(false);
-        loginScreen.SetActive(false);
-        mailVerify.SetActive(false);
+        AppSession.OnboardingComplete = true;
+        ShowOnly(null);
 
-        // Hand off to the campus navigation manager
-        if (campusNavigationManager != null)
-        {
-            campusNavigationManager.ShowMainPanel();
-        }
-        else
-        {
-            Debug.LogError(
-                "UIManager: CampusNavigationManager is not assigned!"
-            );
-        }
+        if (campusNavigationManager != null) campusNavigationManager.ShowMainPanel();
+        else AppLog.Error("UIManager", "CampusNavigationManager is not assigned.");
+    }
+
+    private void ShowOnly(GameObject screenToShow)
+    {
+        SetActive(splashScreen, false);
+        SetActive(loginScreen, false);
+        SetActive(mailVerify, false);
+        SetActive(screenToShow, true);
+    }
+
+    private static void SetActive(GameObject go, bool active)
+    {
+        if (go != null) go.SetActive(active);
     }
 }

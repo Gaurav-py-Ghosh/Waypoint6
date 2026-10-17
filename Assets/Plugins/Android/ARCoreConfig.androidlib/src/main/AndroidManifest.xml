@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Only list the app for devices that support ARCore. Keep in step with
+         "ARCore Requirement: Required" in Assets/Resources/VuforiaConfiguration.asset. -->
+    <uses-feature android:name="android.hardware.camera.ar" android:required="true" />
+
+    <application>
+        <!-- Required by ARCore: without it, creating an ARCore session fails. -->
+        <meta-data android:name="com.google.ar.core" android:value="required" />
+    </application>
+</manifest>
