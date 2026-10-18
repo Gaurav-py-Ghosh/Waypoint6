@@ -61,6 +61,7 @@ public class CampusNavigationManager : MonoBehaviour
     {
         HideAllViews();
         if (destinationPanel != null) destinationPanel.SetActive(true);
+        RouteSync.SyncIfStale(60f);
     }
 
     /// <summary>Hides all menu screens (used when going back to the login screen).</summary>

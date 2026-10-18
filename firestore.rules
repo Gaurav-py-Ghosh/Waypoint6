@@ -1,0 +1,37 @@
+rules_version = '2';
+
+// Security rules for BMUARR shared AR routes (Cloud Firestore, project bmuarr-92f19).
+// Paste into Firebase console > Firestore Database > Rules, then Publish.
+//
+// Everyone (including guests) can read routes. Only the admin Google accounts
+// below can create, change or delete them. Keep this list in sync with
+// Assets/Resources/AdminConfig.asset in the app.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAdmin() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email.lower() in [
+          'gauravghosh24005@gmail.com',
+          'gaurav.ghosh.23cse@bmu.edu.in'
+        ];
+    }
+
+    match /routes/{routeId} {
+      allow read: if true;
+
+      allow create, update: if isAdmin()
+        && request.resource.data.keys().hasOnly(['json', 'destination', 'updatedUtc', 'updatedBy'])
+        && request.resource.data.json is string
+        && request.resource.data.json.size() < 500000;
+
+      allow delete: if isAdmin();
+    }
+
+    // Everything else is closed.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

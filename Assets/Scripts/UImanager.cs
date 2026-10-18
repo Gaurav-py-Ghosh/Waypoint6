@@ -77,6 +77,9 @@ public class UIManager : MonoBehaviour
         AppSession.OnboardingComplete = true;
         ShowOnly(null);
 
+        // Fetch routes recorded by admins (and push this admin's offline recordings).
+        RouteSync.SyncIfStale(30f);
+
         if (campusNavigationManager != null) campusNavigationManager.ShowMainPanel();
         else AppLog.Error("UIManager", "CampusNavigationManager is not assigned.");
     }

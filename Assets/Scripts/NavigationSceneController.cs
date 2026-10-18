@@ -268,7 +268,14 @@ public class NavigationSceneController : MonoBehaviour
         finished = true;
         hud.SetPrimary("", false, false);
         hud.SetRecordingControls(false, false, false);
-        hud.SetStatus("Route saved.");
+        hud.SetStatus("Route saved. Sharing…");
+
+        // Share with everyone via Firebase; the result shows even after leaving this screen.
+        RouteSync.Upload(saved, (shared, message) =>
+        {
+            UINotifier.Show(message, shared ? NoticeKind.Success : NoticeKind.Warning, 5f);
+            if (!leaving && hud != null) hud.SetStatus(shared ? "Route saved and shared." : "Route saved on this phone.");
+        });
 
         // Show the whole saved route so the user can check it.
         if (pathRenderer != null)

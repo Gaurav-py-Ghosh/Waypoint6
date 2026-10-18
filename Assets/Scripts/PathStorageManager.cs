@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 
@@ -22,9 +23,64 @@ public static class PathStorageManager
         }
     }
 
+    private const string PendingUploadsKey = "BMU_PENDING_ROUTE_UPLOADS";
+
     private static string GetFilePath(string destinationName)
     {
         return Path.Combine(DirectoryPath, SanitizeFileName(destinationName) + ".json");
+    }
+
+    /// <summary>Stable id for a destination, used for the local file and the shared cloud copy.</summary>
+    public static string RouteKey(string destinationName) => SanitizeFileName(destinationName);
+
+    /// <summary>All valid routes stored on this phone.</summary>
+    public static List<PathData> LoadAll()
+    {
+        var routes = new List<PathData>();
+        try
+        {
+            foreach (string file in Directory.GetFiles(DirectoryPath, "*.json"))
+            {
+                PathData data = PathData.FromJson(File.ReadAllText(file));
+                if (data != null && data.IsValid) routes.Add(data);
+            }
+        }
+        catch (Exception e)
+        {
+            AppLog.Warn(Tag, "Could not list routes: " + e.Message);
+        }
+        return routes;
+    }
+
+    // ───────── Routes recorded on this phone that still need uploading ─────────
+
+    public static List<string> GetPendingUploads()
+    {
+        string stored = PlayerPrefs.GetString(PendingUploadsKey, "");
+        var list = new List<string>();
+        foreach (string name in stored.Split('\n'))
+        {
+            if (!string.IsNullOrWhiteSpace(name) && !list.Contains(name)) list.Add(name);
+        }
+        return list;
+    }
+
+    public static void MarkPendingUpload(string destinationName)
+    {
+        List<string> list = GetPendingUploads();
+        if (!list.Contains(destinationName)) list.Add(destinationName);
+        PlayerPrefs.SetString(PendingUploadsKey, string.Join("\n", list));
+        PlayerPrefs.Save();
+    }
+
+    public static void ClearPendingUpload(string destinationName)
+    {
+        List<string> list = GetPendingUploads();
+        if (list.Remove(destinationName))
+        {
+            PlayerPrefs.SetString(PendingUploadsKey, string.Join("\n", list));
+            PlayerPrefs.Save();
+        }
     }
 
     private static string SanitizeFileName(string name)
