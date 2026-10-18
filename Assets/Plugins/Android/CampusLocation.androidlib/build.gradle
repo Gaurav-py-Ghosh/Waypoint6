@@ -1,0 +1,9 @@
+apply plugin: 'com.android.library'
+
+// GPS for the campus map. Uses the platform LocationManager (no extra dependencies),
+// because the project's Input System-only setting disables UnityEngine.Input.location.
+android {
+    namespace 'com.bmu.location'
+    compileSdkVersion 34
+    buildToolsVersion '34.0.0'
+}

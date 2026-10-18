@@ -17,6 +17,10 @@ public class CampusNavigationManager : MonoBehaviour
     [Header("Location Check Modal")]
     public LocationPromptModal locationPromptModal;
 
+    [Header("Campus Map")]
+    public GameObject campusMapPanel;
+    public CampusMapController campusMap;
+
     private bool starting;
 
     void Start()
@@ -32,6 +36,10 @@ public class CampusNavigationManager : MonoBehaviour
         if (locationPromptModal != null && locationPromptModal.gameObject.activeSelf)
         {
             locationPromptModal.CloseModal();
+        }
+        else if (campusMapPanel != null && campusMapPanel.activeSelf)
+        {
+            CloseCampusMap();
         }
         else if (destinationPanel != null && destinationPanel.activeSelf)
         {
@@ -55,23 +63,61 @@ public class CampusNavigationManager : MonoBehaviour
         if (destinationPanel != null) destinationPanel.SetActive(true);
     }
 
-    /// <summary>Called by each destination button (e.g. Library, Reception).</summary>
+    /// <summary>Hides all menu screens (used when going back to the login screen).</summary>
+    public void HideMenu() => HideAllViews();
+
+    /// <summary>Explore Campus: the 2D campus map with walking directions.</summary>
+    public void ShowCampusMap()
+    {
+        HideAllViews();
+        if (campusMapPanel != null) campusMapPanel.SetActive(true);
+        else UINotifier.Show("The campus map is not available.", NoticeKind.Warning);
+    }
+
+    public void CloseCampusMap() => ShowMainPanel();
+
+    /// <summary>
+    /// Called by each destination button (e.g. Library, Reception).
+    /// Admins choose between recording and guiding; everyone else goes straight to guidance.
+    /// </summary>
     public void SelectDestination(string destinationName)
     {
         if (string.IsNullOrEmpty(destinationName) || starting) return;
         AppLog.Info(Tag, $"Selected destination '{destinationName}'.");
 
-        if (locationPromptModal != null)
+        bool hasRoute = PathStorageManager.HasPath(destinationName);
+
+        if (UserSession.IsAdmin)
         {
-            locationPromptModal.Open(destinationName, StartRecordingMode, StartGuidanceMode);
+            if (locationPromptModal != null) locationPromptModal.Open(destinationName, StartRecordingMode, StartGuidanceMode, canRecord: true);
+            else Begin(destinationName, hasRoute ? NavigationMode.Guide : NavigationMode.Record);
+            return;
+        }
+
+        if (hasRoute)
+        {
+            StartGuidanceMode(destinationName);
+        }
+        else if (locationPromptModal != null)
+        {
+            // Shows "no route yet" with only a Back button.
+            locationPromptModal.Open(destinationName, null, StartGuidanceMode, canRecord: false);
         }
         else
         {
-            Begin(destinationName, PathStorageManager.HasPath(destinationName) ? NavigationMode.Guide : NavigationMode.Record);
+            UINotifier.Show($"No route to {destinationName} yet. Ask an admin to record it.", NoticeKind.Info);
         }
     }
 
-    public void StartRecordingMode(string destinationName) => Begin(destinationName, NavigationMode.Record);
+    public void StartRecordingMode(string destinationName)
+    {
+        if (!UserSession.IsAdmin)
+        {
+            UINotifier.Show("Only admins can record routes.", NoticeKind.Warning);
+            return;
+        }
+        Begin(destinationName, NavigationMode.Record);
+    }
 
     public void StartGuidanceMode(string destinationName) => Begin(destinationName, NavigationMode.Guide);
 
@@ -105,6 +151,7 @@ public class CampusNavigationManager : MonoBehaviour
     {
         if (mainPanel != null) mainPanel.SetActive(false);
         if (destinationPanel != null) destinationPanel.SetActive(false);
+        if (campusMapPanel != null) campusMapPanel.SetActive(false);
         if (locationPromptModal != null) locationPromptModal.CloseModal();
     }
 

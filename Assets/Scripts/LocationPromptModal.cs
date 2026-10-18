@@ -64,7 +64,8 @@ public class LocationPromptModal : MonoBehaviour
     /// <summary>
     /// Displays the modal configured for the selected destination.
     /// </summary>
-    public void Open(string destinationName, Action<string> onRecord, Action<string> onGuide)
+    /// <param name="canRecord">False for non-admins: they only see Guide Me, or a "no route yet" note.</param>
+    public void Open(string destinationName, Action<string> onRecord, Action<string> onGuide, bool canRecord)
     {
         currentDestination = destinationName;
         onStartRecording = onRecord;
@@ -84,7 +85,9 @@ public class LocationPromptModal : MonoBehaviour
 
             if (messageText != null)
             {
-                messageText.text = "A route is saved for this place. Start at the marker and tap Guide Me. Re-recording replaces the saved route.";
+                messageText.text = canRecord
+                    ? "A route is saved for this place. Start at the marker and tap Guide Me. Re-recording replaces the saved route."
+                    : "Start at the marker, then tap Guide Me.";
             }
 
             if (distanceText != null)
@@ -95,13 +98,15 @@ public class LocationPromptModal : MonoBehaviour
 
             if (recordButton != null) recordButton.gameObject.SetActive(false);
             if (guideMeButton != null) guideMeButton.gameObject.SetActive(true);
-            if (reRecordButton != null) reRecordButton.gameObject.SetActive(true);
+            if (reRecordButton != null) reRecordButton.gameObject.SetActive(canRecord);
         }
         else
         {
             if (messageText != null)
             {
-                messageText.text = "No route saved yet. Stand at the marker, tap Record Path, then walk to this place.";
+                messageText.text = canRecord
+                    ? "No route saved yet. Stand at the marker, tap Record Path, then place points along the way."
+                    : "No route to this place yet. Ask an admin to record it.";
             }
 
             if (distanceText != null)
@@ -109,7 +114,7 @@ public class LocationPromptModal : MonoBehaviour
                 distanceText.gameObject.SetActive(false);
             }
 
-            if (recordButton != null) recordButton.gameObject.SetActive(true);
+            if (recordButton != null) recordButton.gameObject.SetActive(canRecord);
             if (guideMeButton != null) guideMeButton.gameObject.SetActive(false);
             if (reRecordButton != null) reRecordButton.gameObject.SetActive(false);
         }

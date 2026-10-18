@@ -7,10 +7,12 @@ import android.os.Looper;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
+import androidx.credentials.ClearCredentialStateRequest;
 import androidx.credentials.Credential;
 import androidx.credentials.CredentialManager;
 import androidx.credentials.GetCredentialRequest;
 import androidx.credentials.GetCredentialResponse;
+import androidx.credentials.exceptions.ClearCredentialException;
 import androidx.credentials.exceptions.GetCredentialException;
 
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption;
@@ -99,6 +101,38 @@ public class GoogleAuthBridge {
                     public void onError(@NonNull GetCredentialException e) {
                         Log.e(TAG, "Google sign-in failed", e);
                         sendResult("ERROR|" + e.getMessage());
+                    }
+                });
+    }
+
+    /**
+     * Forgets the Google account chosen for this app, so the next sign-in
+     * shows the account picker again. Firebase sign-out is done in Unity.
+     */
+    public static void signOut() {
+
+        if (activity == null) {
+            return;
+        }
+
+        if (credentialManager == null) {
+            credentialManager = CredentialManager.create(activity);
+        }
+
+        credentialManager.clearCredentialStateAsync(
+                new ClearCredentialStateRequest(),
+                new CancellationSignal(),
+                activity.getMainExecutor(),
+                new androidx.credentials.CredentialManagerCallback<Void, ClearCredentialException>() {
+
+                    @Override
+                    public void onResult(Void result) {
+                        Log.d(TAG, "Google credential state cleared.");
+                    }
+
+                    @Override
+                    public void onError(@NonNull ClearCredentialException e) {
+                        Log.e(TAG, "Could not clear Google credential state", e);
                     }
                 });
     }

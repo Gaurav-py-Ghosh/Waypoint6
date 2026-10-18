@@ -35,18 +35,33 @@ public static class BMUARRSetup
     private const string ArrowSpritePath = GeneratedUIFolder + "/NavArrow.png";
     private const string TargetImagePath = "Assets/UI/ImageTargets/Image_target.jpeg";
     private const string FontPath = "Assets/TextMesh Pro/Resources/Fonts & Materials/LiberationSans SDF.asset";
+    // Rounded display font used by the app's button artwork; used for titles and buttons.
+    private const string DisplayFontPath = "Assets/Fonts/PoetsenOne-Regular SDF.asset";
+    private const string AdminConfigPath = "Assets/Resources/AdminConfig.asset";
+    private const string CampusMapConfigPath = "Assets/Resources/CampusMapConfig.asset";
+    private const string MapsApiConfigPath = "Assets/Resources/MapsApiConfig.asset"; // Git-ignored: holds the API key.
+    private const string PinSpritePath = GeneratedUIFolder + "/MapPin.png";
+    private const string DotSpritePath = GeneratedUIFolder + "/Dot.png";
+
     private const float MarkerWidthMeters = 0.2f;
 
     private const int UILayer = 5;
 
-    private static readonly Color PanelColor = new Color(0.06f, 0.08f, 0.12f, 0.94f);
-    private static readonly Color CardColor = new Color(0.09f, 0.12f, 0.20f, 0.98f);
-    private static readonly Color PrimaryColor = new Color(0.15f, 0.75f, 0.42f);
-    private static readonly Color SecondaryColor = new Color(0.30f, 0.33f, 0.42f);
-    private static readonly Color DangerColor = new Color(0.80f, 0.25f, 0.25f);
-    private static readonly Color AccentColor = new Color(0.20f, 1f, 0.55f);
-    private static readonly Color BannerColor = new Color(0.62f, 0.42f, 0.05f, 0.96f);
-    private static readonly Color AccentFinishColor = new Color(0.12f, 0.55f, 0.95f);
+    // App theme, sampled from the existing screens: green #00B859, mint #DDFFEE / #B2EBCF, white cards.
+    private static readonly Color BrandGreen = new Color32(0x00, 0xB8, 0x59, 0xFF);
+    private static readonly Color BrandGreenDark = new Color32(0x00, 0x8C, 0x44, 0xFF);
+    private static readonly Color Mint = new Color32(0xDD, 0xFF, 0xEE, 0xFF);
+    private static readonly Color MintBorder = new Color32(0xB2, 0xEB, 0xCF, 0xFF);
+    private static readonly Color TextDark = new Color32(0x1E, 0x2A, 0x24, 0xFF);
+
+    private static readonly Color PanelColor = new Color(1f, 1f, 1f, 0.96f);
+    private static readonly Color CardColor = Color.white;
+    private static readonly Color PrimaryColor = BrandGreen;
+    private static readonly Color SecondaryColor = Mint;
+    private static readonly Color DangerColor = new Color32(0xE5, 0x48, 0x4D, 0xFF);
+    private static readonly Color AccentColor = BrandGreen;
+    private static readonly Color BannerColor = new Color(0.92f, 0.62f, 0.10f, 0.97f);
+    private static readonly Color AccentFinishColor = BrandGreenDark;
 
     // ───────────────────────── Scene setup ─────────────────────────
 
@@ -64,6 +79,9 @@ public static class BMUARRSetup
 
         string menuPath = EnsureMenuSceneAsset();
         if (menuPath == null) return;
+        EnsureAdminConfig();
+        EnsureCampusMapConfig();
+        EnsureMapsApiConfig();
 
         Material routeMaterial = EnsureMaterial(RouteMaterialPath, transparent: true, doubleSided: true);
         Material markerMaterial = EnsureMaterial(MarkerMaterialPath, transparent: false, doubleSided: false);
@@ -245,7 +263,7 @@ public static class BMUARRSetup
 
     private static void BuildMenuScene(Scene menu)
     {
-        foreach (string name in new[] { "AR Session", "XR Origin (AR Rig)", "WaypointManager", "Calibrated_World_Origin", "RecordingHUD", "GuidanceHUD", "NotifierArea" })
+        foreach (string name in new[] { "AR Session", "XR Origin (AR Rig)", "WaypointManager", "Calibrated_World_Origin", "RecordingHUD", "GuidanceHUD", "NotifierArea", "LocationPromptModal", "MainHeader", "CampusMapPanel", "ModeChips" })
         {
             foreach (GameObject go in FindByName(menu, name)) Object.DestroyImmediate(go);
         }
@@ -283,17 +301,17 @@ public static class BMUARRSetup
         if (tMain != null) navMgr.mainPanel = tMain.gameObject;
         if (tDest != null) navMgr.destinationPanel = tDest.gameObject;
 
-        var modal = canvasGO.GetComponentInChildren<LocationPromptModal>(true);
-        if (modal != null)
-        {
-            navMgr.locationPromptModal = modal;
-            if (modal.messageText != null)
-            {
-                modal.messageText.enableAutoSizing = true;
-                modal.messageText.fontSizeMin = 14;
-                modal.messageText.fontSizeMax = 22;
-            }
-        }
+        navMgr.locationPromptModal = BuildLocationPromptModal(tCanvas);
+        AlignLoginButtons(tCanvas);
+
+        // Explore Campus: 2D campus map. Select Destination: 2D / AR tags on each place.
+        Sprite pinSprite = EnsureGeneratedSprite(PinSpritePath, 192, 256, PinShape);
+        Sprite dotSprite = EnsureGeneratedSprite(DotSpritePath, 128, 128, p => (p - new Vector2(0.5f, 0.5f)).magnitude <= 0.48f);
+        Image destBack = tDest != null && tDest.Find("Back") != null ? tDest.Find("Back").GetComponent<Image>() : null;
+        navMgr.campusMap = BuildCampusMapPanel(tCanvas, navMgr, pinSprite, dotSprite, destBack != null ? destBack.sprite : null);
+        navMgr.campusMapPanel = navMgr.campusMap.gameObject;
+        navMgr.campusMap.transform.SetSiblingIndex(navMgr.locationPromptModal.transform.GetSiblingIndex());
+        if (tMain != null) RewireButton(tMain.Find("Explore_Button"), navMgr.ShowCampusMap);
 
         // Legacy QR / AR panels are unused; keep them hidden.
         foreach (string legacy in new[] { "QRMainPanel", "QRScanningPanel", "ARScreenPanel", "DestARScreenPanel" })
@@ -313,8 +331,10 @@ public static class BMUARRSetup
                 uiManager.googleAuthManager = auth;
             }
 
-            GameObject googleButton = FindByName(menu, "Continue with Google").FirstOrDefault();
+            Transform googleButton = tCanvas.Find("Mail_Verification_Panel/Continue with Google");
             if (auth != null && googleButton != null) auth.signInButton = googleButton.GetComponent<Button>();
+
+            if (tMain != null) BuildMainHeader(tMain, uiManager, auth);
         }
         else
         {
@@ -330,6 +350,499 @@ public static class BMUARRSetup
         CreateNotifier(notifierRoot.transform);
 
         CreateEventSystemIfMissing(menu);
+    }
+
+    // ───────────────────────── Menu UI ─────────────────────────
+
+    /// <summary>The Record / Guide Me prompt, in the app's white-and-green card style.</summary>
+    private static LocationPromptModal BuildLocationPromptModal(Transform canvas)
+    {
+        var root = new GameObject("LocationPromptModal", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
+        root.layer = UILayer;
+        root.transform.SetParent(canvas, false);
+        Stretch(root.GetComponent<RectTransform>());
+        root.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.55f); // Dims and blocks taps behind.
+        root.transform.SetAsLastSibling();
+
+        RectTransform card = CreatePanel("Card", root.transform, CardColor);
+        card.anchorMin = new Vector2(0.07f, 0.5f);
+        card.anchorMax = new Vector2(0.93f, 0.5f);
+        card.sizeDelta = new Vector2(0f, 900f);
+        card.anchoredPosition = Vector2.zero;
+        var cardOutline = card.gameObject.AddComponent<Outline>();
+        cardOutline.effectColor = MintBorder;
+        cardOutline.effectDistance = new Vector2(4f, -4f);
+
+        var modal = root.AddComponent<LocationPromptModal>();
+
+        modal.titleText = CreateText("Title", card, "Destination", 58, FontStyles.Bold, BrandGreenDark);
+        Place(modal.titleText.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(0, -95), new Vector2(-80, 100));
+        modal.titleText.enableAutoSizing = true;
+        modal.titleText.fontSizeMin = 36;
+        modal.titleText.fontSizeMax = 58;
+
+        modal.messageText = CreateText("Message", card, "", 34, FontStyles.Normal, TextDark);
+        Place(modal.messageText.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(0, -260), new Vector2(-100, 200));
+        modal.messageText.enableAutoSizing = true;
+        modal.messageText.fontSizeMin = 22;
+        modal.messageText.fontSizeMax = 34;
+
+        modal.distanceText = CreateText("Distance", card, "", 32, FontStyles.Bold, BrandGreen);
+        Place(modal.distanceText.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(0, -400), new Vector2(-80, 60));
+
+        modal.recordButton = CreateButton("RecordButton", card, "Record Path", PrimaryColor, 40, out _);
+        Place((RectTransform)modal.recordButton.transform, new Vector2(0.08f, 0), new Vector2(0.92f, 0), new Vector2(0, 345), new Vector2(0, 130));
+        modal.guideMeButton = CreateButton("GuideMeButton", card, "Guide Me", PrimaryColor, 40, out _);
+        Place((RectTransform)modal.guideMeButton.transform, new Vector2(0.08f, 0), new Vector2(0.92f, 0), new Vector2(0, 345), new Vector2(0, 130));
+        modal.reRecordButton = CreateButton("ReRecordButton", card, "Re-record Path", SecondaryColor, 32, out _);
+        Place((RectTransform)modal.reRecordButton.transform, new Vector2(0.08f, 0), new Vector2(0.92f, 0), new Vector2(0, 205), new Vector2(0, 100));
+        modal.cancelButton = CreateButton("CancelButton", card, "Back", Color.white, 32, out _);
+        Place((RectTransform)modal.cancelButton.transform, new Vector2(0.08f, 0), new Vector2(0.92f, 0), new Vector2(0, 80), new Vector2(0, 90));
+
+        root.SetActive(false);
+        return modal;
+    }
+
+    /// <summary>Welcome line, admin badge and Log out / Sign in button on the main screen.</summary>
+    private static void BuildMainHeader(Transform mainPanel, UIManager uiManager, GoogleAuthManager auth)
+    {
+        var header = new GameObject("MainHeader", typeof(RectTransform), typeof(SafeAreaFitter));
+        header.layer = UILayer;
+        header.transform.SetParent(mainPanel, false);
+        Stretch(header.GetComponent<RectTransform>());
+        header.transform.SetAsLastSibling();
+
+        var component = header.AddComponent<MainPanelHeader>();
+        component.uiManager = uiManager;
+        component.googleAuthManager = auth;
+
+        component.accountButton = CreateButton("AccountButton", header.transform, "Log out", Color.white, 32, out component.accountButtonText);
+        var accountRt = (RectTransform)component.accountButton.transform;
+        accountRt.anchorMin = accountRt.anchorMax = accountRt.pivot = new Vector2(1f, 1f);
+        accountRt.anchoredPosition = new Vector2(-36f, -36f);
+        accountRt.sizeDelta = new Vector2(250f, 96f);
+
+        component.welcomeText = CreateText("Welcome", header.transform, "Welcome!", 60, FontStyles.Bold, BrandGreenDark);
+        Place(component.welcomeText.rectTransform, new Vector2(0.06f, 0.405f), new Vector2(0.94f, 0.455f), Vector2.zero, Vector2.zero);
+        component.welcomeText.enableAutoSizing = true;
+        component.welcomeText.fontSizeMin = 36;
+        component.welcomeText.fontSizeMax = 60;
+        component.welcomeText.textWrappingMode = TextWrappingModes.NoWrap;
+
+        RectTransform badge = CreatePanel("AdminBadge", header.transform, BrandGreen);
+        badge.anchorMin = badge.anchorMax = new Vector2(0.5f, 0.381f);
+        badge.sizeDelta = new Vector2(200f, 56f);
+        badge.anchoredPosition = Vector2.zero;
+        component.roleBadge = badge.gameObject;
+        component.roleText = CreateText("Label", badge, "ADMIN", 30, FontStyles.Bold, Color.white);
+        Stretch(component.roleText.rectTransform);
+        badge.gameObject.SetActive(false);
+    }
+
+    /// <summary>Gives the Google button on the second login screen the same layout as the first screen's buttons.</summary>
+    private static void AlignLoginButtons(Transform canvas)
+    {
+        var loginButton = canvas.Find("Login_Screen_Panel/LoginiwthID") as RectTransform;
+        var loginSkip = canvas.Find("Login_Screen_Panel/SkipLogin (1)") as RectTransform;
+        var googleButton = canvas.Find("Mail_Verification_Panel/Continue with Google") as RectTransform;
+        var mailSkip = canvas.Find("Mail_Verification_Panel/SkipLogin") as RectTransform;
+
+        CopyLayout(loginButton, googleButton);
+        CopyLayout(loginSkip, mailSkip);
+    }
+
+    private static void CopyLayout(RectTransform from, RectTransform to)
+    {
+        if (from == null || to == null) return;
+        to.anchorMin = from.anchorMin;
+        to.anchorMax = from.anchorMax;
+        to.pivot = from.pivot;
+        to.sizeDelta = from.sizeDelta;
+        to.anchoredPosition = from.anchoredPosition;
+        to.localScale = Vector3.one;
+    }
+
+    /// <summary>Explore Campus: title, place chips, styled map with pins and route, and a directions card.</summary>
+    private static CampusMapController BuildCampusMapPanel(Transform canvas, CampusNavigationManager navMgr,
+                                                           Sprite pinSprite, Sprite dotSprite, Sprite backSprite)
+    {
+        const float topBarHeight = 200f;
+        const float chipsHeight = 112f;
+        Color mutedText = new Color32(0x5E, 0x6E, 0x66, 0xFF);
+
+        var root = new GameObject("CampusMapPanel", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
+        root.layer = UILayer;
+        root.transform.SetParent(canvas, false);
+        Stretch(root.GetComponent<RectTransform>());
+        root.GetComponent<Image>().color = new Color32(0xF1, 0xFB, 0xF5, 0xFF);
+        var map = root.AddComponent<CampusMapController>();
+
+        var safe = new GameObject("SafeArea", typeof(RectTransform), typeof(SafeAreaFitter));
+        safe.layer = UILayer;
+        safe.transform.SetParent(root.transform, false);
+        Stretch(safe.GetComponent<RectTransform>());
+
+        // Map viewport with pan (ScrollRect) below the title and chips.
+        var viewportGO = new GameObject("MapViewport", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image), typeof(RectMask2D), typeof(ScrollRect));
+        viewportGO.layer = UILayer;
+        viewportGO.transform.SetParent(safe.transform, false);
+        var viewport = viewportGO.GetComponent<RectTransform>();
+        Stretch(viewport);
+        viewport.offsetMax = new Vector2(0f, -(topBarHeight + chipsHeight));
+        viewportGO.GetComponent<Image>().color = new Color(1f, 1f, 1f, 0f); // Catches drags.
+
+        var contentGO = new GameObject("MapContent", typeof(RectTransform));
+        contentGO.layer = UILayer;
+        contentGO.transform.SetParent(viewport, false);
+        var content = contentGO.GetComponent<RectTransform>();
+        content.anchorMin = content.anchorMax = content.pivot = new Vector2(0.5f, 0.5f);
+        content.sizeDelta = new Vector2(1000f, 1000f);
+
+        var scroll = viewportGO.GetComponent<ScrollRect>();
+        scroll.content = content;
+        scroll.viewport = viewport;
+        scroll.horizontal = true;
+        scroll.vertical = true;
+        scroll.movementType = ScrollRect.MovementType.Clamped;
+        scroll.inertia = true;
+        scroll.decelerationRate = 0.12f;
+        scroll.scrollSensitivity = 0f; // Mouse wheel zooms instead.
+
+        var imageGO = new GameObject("MapImage", typeof(RectTransform), typeof(CanvasRenderer), typeof(RawImage));
+        imageGO.layer = UILayer;
+        imageGO.transform.SetParent(content, false);
+        Stretch(imageGO.GetComponent<RectTransform>());
+        var mapImage = imageGO.GetComponent<RawImage>();
+        mapImage.color = new Color32(0xE8, 0xF8, 0xEF, 0xFF);
+        mapImage.raycastTarget = false;
+
+        UILineGraphic casing = CreateLine("RouteCasing", content, Color.white);
+        UILineGraphic line = CreateLine("RouteLine", content, BrandGreen);
+
+        var pinsGO = new GameObject("Pins", typeof(RectTransform));
+        pinsGO.layer = UILayer;
+        pinsGO.transform.SetParent(content, false);
+        Stretch(pinsGO.GetComponent<RectTransform>());
+
+        var dotGO = new GameObject("UserDot", typeof(RectTransform));
+        dotGO.layer = UILayer;
+        dotGO.transform.SetParent(content, false);
+        var dot = dotGO.GetComponent<RectTransform>();
+        dot.anchorMin = dot.anchorMax = new Vector2(0.5f, 0.5f);
+        dot.sizeDelta = new Vector2(110f, 110f);
+        RectTransform halo = AddDotLayer(dot, "Halo", dotSprite, new Color(BrandGreen.r, BrandGreen.g, BrandGreen.b, 0.3f), 110f);
+        AddDotLayer(dot, "Ring", dotSprite, Color.white, 46f);
+        AddDotLayer(dot, "Core", dotSprite, BrandGreen, 30f);
+        dotGO.SetActive(false);
+
+        // Title bar.
+        RectTransform top = CreatePanel("TopBar", safe.transform, Color.white);
+        AnchorTop(top, 0f, topBarHeight);
+        Image topImage = top.GetComponent<Image>();
+        topImage.sprite = null; // Plain bar, edge to edge.
+        topImage.type = Image.Type.Simple;
+        var backGO = new GameObject("Back", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image), typeof(Button));
+        backGO.layer = UILayer;
+        backGO.transform.SetParent(top, false);
+        var backRt = backGO.GetComponent<RectTransform>();
+        backRt.anchorMin = backRt.anchorMax = new Vector2(0f, 0.5f);
+        backRt.pivot = new Vector2(0f, 0.5f);
+        backRt.anchoredPosition = new Vector2(36f, 0f);
+        backRt.sizeDelta = new Vector2(110f, 110f);
+        var backImage = backGO.GetComponent<Image>();
+        backImage.sprite = backSprite;
+        backImage.color = backSprite != null ? Color.white : BrandGreen;
+        backImage.preserveAspect = true;
+        UnityEventTools.AddVoidPersistentListener(backGO.GetComponent<Button>().onClick, navMgr.CloseCampusMap);
+        TMP_Text title = CreateText("Title", top, "Explore Campus", 52, FontStyles.Bold, BrandGreenDark);
+        Place(title.rectTransform, new Vector2(0, 0.42f), new Vector2(1, 1), Vector2.zero, new Vector2(-340, 0));
+        TMP_Text subtitle = CreateText("Subtitle", top, "Tap a place to get walking directions", 28, FontStyles.Normal, mutedText);
+        Place(subtitle.rectTransform, new Vector2(0, 0.08f), new Vector2(1, 0.42f), Vector2.zero, new Vector2(-340, 0));
+
+        // Place chips: horizontal, scrollable.
+        var chipsBarGO = new GameObject("PlaceChips", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image), typeof(RectMask2D), typeof(ScrollRect));
+        chipsBarGO.layer = UILayer;
+        chipsBarGO.transform.SetParent(safe.transform, false);
+        var chipsBar = chipsBarGO.GetComponent<RectTransform>();
+        AnchorTop(chipsBar, -topBarHeight, chipsHeight);
+        chipsBarGO.GetComponent<Image>().color = Color.white;
+        var chipsContentGO = new GameObject("Content", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(ContentSizeFitter));
+        chipsContentGO.layer = UILayer;
+        chipsContentGO.transform.SetParent(chipsBar, false);
+        var chipsContent = chipsContentGO.GetComponent<RectTransform>();
+        chipsContent.anchorMin = new Vector2(0f, 0f);
+        chipsContent.anchorMax = new Vector2(0f, 1f);
+        chipsContent.pivot = new Vector2(0f, 0.5f);
+        chipsContent.anchoredPosition = Vector2.zero;
+        var layout = chipsContentGO.GetComponent<HorizontalLayoutGroup>();
+        layout.padding = new RectOffset(30, 30, 16, 20);
+        layout.spacing = 16f;
+        layout.childAlignment = TextAnchor.MiddleLeft;
+        layout.childControlWidth = true;
+        layout.childControlHeight = true;
+        layout.childForceExpandWidth = false;
+        layout.childForceExpandHeight = false;
+        chipsContentGO.GetComponent<ContentSizeFitter>().horizontalFit = ContentSizeFitter.FitMode.PreferredSize;
+        var chipsScroll = chipsBarGO.GetComponent<ScrollRect>();
+        chipsScroll.content = chipsContent;
+        chipsScroll.viewport = chipsBar;
+        chipsScroll.horizontal = true;
+        chipsScroll.vertical = false;
+        chipsScroll.movementType = ScrollRect.MovementType.Clamped;
+        chipsScroll.scrollSensitivity = 0f;
+        var divider = CreateImage("Divider", chipsBar, MintBorder, null, sliced: false);
+        divider.rectTransform.anchorMin = new Vector2(0f, 0f);
+        divider.rectTransform.anchorMax = new Vector2(1f, 0f);
+        divider.rectTransform.pivot = new Vector2(0.5f, 0f);
+        divider.rectTransform.sizeDelta = new Vector2(0f, 3f);
+        divider.raycastTarget = false;
+
+        // Status pill (loading / errors), floating over the map.
+        RectTransform pill = CreatePanel("StatusPill", safe.transform, Color.white);
+        AnchorTop(pill, -(topBarHeight + chipsHeight + 24f), 84f, horizontalInset: 90f);
+        AddOutline(pill.gameObject);
+        TMP_Text status = CreateText("Text", pill, "Loading map…", 28, FontStyles.Normal, TextDark);
+        Place(status.rectTransform, Vector2.zero, Vector2.one, Vector2.zero, new Vector2(-40, -10));
+        status.enableAutoSizing = true;
+        status.fontSizeMin = 18;
+        status.fontSizeMax = 28;
+
+        // Recenter on the user.
+        var recenterGO = new GameObject("Recenter", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image), typeof(Button));
+        recenterGO.layer = UILayer;
+        recenterGO.transform.SetParent(safe.transform, false);
+        var recenterRt = recenterGO.GetComponent<RectTransform>();
+        recenterRt.anchorMin = recenterRt.anchorMax = recenterRt.pivot = new Vector2(1f, 0f);
+        recenterRt.anchoredPosition = new Vector2(-36f, 360f);
+        recenterRt.sizeDelta = new Vector2(110f, 110f);
+        var recenterImage = recenterGO.GetComponent<Image>();
+        recenterImage.sprite = dotSprite;
+        recenterImage.color = Color.white;
+        AddOutline(recenterGO);
+        AddDotLayer(recenterRt, "Ring", dotSprite, BrandGreen, 44f);
+        AddDotLayer(recenterRt, "Hole", dotSprite, Color.white, 26f);
+        AddDotLayer(recenterRt, "Dot", dotSprite, BrandGreen, 14f);
+
+        // Directions card.
+        RectTransform card = CreatePanel("InfoCard", safe.transform, Color.white);
+        AnchorBottom(card, 30f, 300f, horizontalInset: 30f);
+        AddOutline(card.gameObject);
+        Image icon = CreateImage("Icon", card, BrandGreen, pinSprite, sliced: false);
+        icon.preserveAspect = true;
+        icon.raycastTarget = false;
+        icon.rectTransform.anchorMin = icon.rectTransform.anchorMax = icon.rectTransform.pivot = new Vector2(0f, 1f);
+        icon.rectTransform.anchoredPosition = new Vector2(36f, -36f);
+        icon.rectTransform.sizeDelta = new Vector2(72f, 96f);
+        TMP_Text infoTitle = CreateText("Title", card, "Library", 46, FontStyles.Bold, BrandGreenDark);
+        Place(infoTitle.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(10, -64), new Vector2(-260, 70));
+        infoTitle.alignment = TextAlignmentOptions.Left;
+        infoTitle.enableAutoSizing = true;
+        infoTitle.fontSizeMin = 30;
+        infoTitle.fontSizeMax = 46;
+        TMP_Text infoDetail = CreateText("Detail", card, "", 34, FontStyles.Bold, BrandGreen);
+        Place(infoDetail.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(10, -122), new Vector2(-260, 50));
+        infoDetail.alignment = TextAlignmentOptions.Left;
+        TMP_Text infoSub = CreateText("SubDetail", card, "", 26, FontStyles.Normal, mutedText);
+        Place(infoSub.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(10, -170), new Vector2(-260, 44));
+        infoSub.alignment = TextAlignmentOptions.Left;
+        infoSub.enableAutoSizing = true;
+        infoSub.fontSizeMin = 18;
+        infoSub.fontSizeMax = 26;
+        Button clear = CreateButton("ClearButton", card, "Clear route", SecondaryColor, 30, out _);
+        Place((RectTransform)clear.transform, new Vector2(0.05f, 0), new Vector2(0.95f, 0), new Vector2(0, 62), new Vector2(0, 84));
+        Button close = CreateButton("CloseButton", card, "×", Color.white, 44, out _);
+        var closeRt = (RectTransform)close.transform;
+        closeRt.anchorMin = closeRt.anchorMax = closeRt.pivot = new Vector2(1f, 1f);
+        closeRt.anchoredPosition = new Vector2(-24f, -24f);
+        closeRt.sizeDelta = new Vector2(84f, 84f);
+        card.gameObject.SetActive(false);
+
+        map.scrollRect = scroll;
+        map.viewport = viewport;
+        map.mapContent = content;
+        map.mapImage = mapImage;
+        map.pathCasing = casing;
+        map.pathLine = line;
+        map.pinsRoot = pinsGO.GetComponent<RectTransform>();
+        map.userDot = dot;
+        map.userHalo = halo;
+        map.pinSprite = pinSprite;
+        map.roundedSprite = RoundedSprite;
+        map.labelFont = AssetDatabase.LoadAssetAtPath<TMP_FontAsset>(DisplayFontPath);
+        map.placeChipsRoot = chipsContent;
+        map.pinColor = BrandGreen;
+        map.selectedPinColor = BrandGreenDark;
+        map.statusText = status;
+        map.statusPill = pill.gameObject;
+        map.recenterButton = recenterGO.GetComponent<Button>();
+        map.infoCard = card.gameObject;
+        map.infoTitle = infoTitle;
+        map.infoDetail = infoDetail;
+        map.infoSubDetail = infoSub;
+        map.infoClearButton = clear;
+        map.infoCloseButton = close;
+
+        root.SetActive(false);
+        return map;
+    }
+
+    private static UILineGraphic CreateLine(string name, Transform parent, Color color)
+    {
+        var go = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(UILineGraphic));
+        go.layer = UILayer;
+        go.transform.SetParent(parent, false);
+        Stretch(go.GetComponent<RectTransform>());
+        var line = go.GetComponent<UILineGraphic>();
+        line.color = color;
+        line.raycastTarget = false;
+        return line;
+    }
+
+    private static void RewireButton(Transform buttonTransform, UnityEngine.Events.UnityAction action)
+    {
+        if (buttonTransform == null) return;
+        Button button = buttonTransform.GetComponent<Button>();
+        if (button == null) return;
+        RemovePersistentListeners(button.onClick);
+        UnityEventTools.AddVoidPersistentListener(button.onClick, action);
+    }
+
+    private static RectTransform AddDotLayer(RectTransform parent, string name, Sprite sprite, Color color, float size)
+    {
+        var go = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
+        go.layer = UILayer;
+        go.transform.SetParent(parent, false);
+        var rt = go.GetComponent<RectTransform>();
+        rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
+        rt.sizeDelta = new Vector2(size, size);
+        var image = go.GetComponent<Image>();
+        image.sprite = sprite;
+        image.color = color;
+        image.raycastTarget = false;
+        return rt;
+    }
+
+    private static void AddOutline(GameObject go)
+    {
+        var outline = go.AddComponent<Outline>();
+        outline.effectColor = MintBorder;
+        outline.effectDistance = new Vector2(3f, -3f);
+    }
+
+    /// <summary>Map pin: a teardrop with a hole, tip at the bottom centre.</summary>
+    private static bool PinShape(Vector2 p)
+    {
+        var head = new Vector2(0.5f, 0.64f);
+        float headRadius = 0.34f;
+        bool inHead = (p - head).magnitude <= headRadius;
+        bool inTip = PointInPolygon(p, new[] { new Vector2(0.5f, 0.02f), new Vector2(0.215f, 0.5f), new Vector2(0.785f, 0.5f) });
+        bool inHole = (p - head).magnitude <= 0.14f;
+        return (inHead || inTip) && !inHole;
+    }
+
+    /// <summary>Rasterises a white, anti-aliased shape to a PNG sprite (once).</summary>
+    private static Sprite EnsureGeneratedSprite(string path, int width, int height, System.Func<Vector2, bool> inside)
+    {
+        var existing = AssetDatabase.LoadAssetAtPath<Sprite>(path);
+        if (existing != null) return existing;
+
+        if (!AssetDatabase.IsValidFolder("Assets/UI")) AssetDatabase.CreateFolder("Assets", "UI");
+        if (!AssetDatabase.IsValidFolder(GeneratedUIFolder)) AssetDatabase.CreateFolder("Assets/UI", "Generated");
+
+        const int supersample = 4;
+        var tex = new Texture2D(width, height, TextureFormat.RGBA32, false);
+        var pixels = new Color32[width * height];
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                int hits = 0;
+                for (int sy = 0; sy < supersample; sy++)
+                for (int sx = 0; sx < supersample; sx++)
+                {
+                    var p = new Vector2((x + (sx + 0.5f) / supersample) / width, (y + (sy + 0.5f) / supersample) / height);
+                    if (inside(p)) hits++;
+                }
+                pixels[y * width + x] = new Color32(255, 255, 255, (byte)(255 * hits / (supersample * supersample)));
+            }
+        }
+        tex.SetPixels32(pixels);
+        tex.Apply();
+        File.WriteAllBytes(path, tex.EncodeToPNG());
+        Object.DestroyImmediate(tex);
+        AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate);
+
+        var importer = (TextureImporter)AssetImporter.GetAtPath(path);
+        importer.textureType = TextureImporterType.Sprite;
+        importer.spriteImportMode = SpriteImportMode.Single;
+        importer.alphaIsTransparency = true;
+        importer.mipmapEnabled = false;
+        importer.SaveAndReimport();
+        return AssetDatabase.LoadAssetAtPath<Sprite>(path);
+    }
+
+    [MenuItem("Tools/BMU AR/Edit Campus Map")]
+    public static void EditCampusMap()
+    {
+        CampusMapConfig config = EnsureCampusMapConfig();
+        Selection.activeObject = config;
+        EditorGUIUtility.PingObject(config);
+    }
+
+    private static CampusMapConfig EnsureCampusMapConfig()
+    {
+        var config = AssetDatabase.LoadAssetAtPath<CampusMapConfig>(CampusMapConfigPath);
+        if (config != null) return config;
+
+        if (!AssetDatabase.IsValidFolder("Assets/Resources")) AssetDatabase.CreateFolder("Assets", "Resources");
+        config = ScriptableObject.CreateInstance<CampusMapConfig>();
+        // Library and Reception from Google Places; the rest marked on campus.
+        config.places.Add(new CampusPlace { id = "Library", displayName = "Library", latitude = 28.246684, longitude = 76.814495, placed = true });
+        config.places.Add(new CampusPlace { id = "Reception", displayName = "Reception", latitude = 28.247239, longitude = 76.814434, placed = true });
+        config.places.Add(new CampusPlace { id = "Grand Auditorium", displayName = "Grand Auditorium", latitude = 28.24748598393818, longitude = 76.81404787416709, placed = true });
+        config.places.Add(new CampusPlace { id = "Program Office", displayName = "Program Office", latitude = 28.247535457469354, longitude = 76.81436405015543, placed = true });
+        config.places.Add(new CampusPlace { id = "D Cafe", displayName = "D'Cafe", latitude = 28.248251933382374, longitude = 76.81152110823511, placed = true });
+        AssetDatabase.CreateAsset(config, CampusMapConfigPath);
+        AssetDatabase.SaveAssets();
+        Debug.Log("BMU AR: Created " + CampusMapConfigPath + " (Tools > BMU AR > Edit Campus Map).");
+        return config;
+    }
+
+    private static void EnsureMapsApiConfig()
+    {
+        var config = AssetDatabase.LoadAssetAtPath<MapsApiConfig>(MapsApiConfigPath);
+        if (config == null)
+        {
+            if (!AssetDatabase.IsValidFolder("Assets/Resources")) AssetDatabase.CreateFolder("Assets", "Resources");
+            config = ScriptableObject.CreateInstance<MapsApiConfig>();
+            AssetDatabase.CreateAsset(config, MapsApiConfigPath);
+            AssetDatabase.SaveAssets();
+        }
+        if (string.IsNullOrWhiteSpace(config.apiKey))
+        {
+            Debug.LogWarning("BMU AR: No Google Maps API key in " + MapsApiConfigPath + "; the campus map will not load. This file is git-ignored.");
+        }
+    }
+
+    [MenuItem("Tools/BMU AR/Edit Admin List")]
+    public static void EditAdminList()
+    {
+        AdminConfig config = EnsureAdminConfig();
+        Selection.activeObject = config;
+        EditorGUIUtility.PingObject(config);
+    }
+
+    private static AdminConfig EnsureAdminConfig()
+    {
+        var config = AssetDatabase.LoadAssetAtPath<AdminConfig>(AdminConfigPath);
+        if (config != null) return config;
+
+        if (!AssetDatabase.IsValidFolder("Assets/Resources")) AssetDatabase.CreateFolder("Assets", "Resources");
+        config = ScriptableObject.CreateInstance<AdminConfig>();
+        AssetDatabase.CreateAsset(config, AdminConfigPath);
+        AssetDatabase.SaveAssets();
+        Debug.Log("BMU AR: Created " + AdminConfigPath + ". Add admin Google emails there (Tools > BMU AR > Edit Admin List).");
+        return config;
     }
 
     // ───────────────────────── Vuforia helpers ─────────────────────────
@@ -433,7 +946,7 @@ public static class BMUARRSetup
         AnchorTop(top, 0f, 250f);
         hud.titleText = CreateText("Title", top, "RECORDING", 42, FontStyles.Bold, AccentColor);
         Place(hud.titleText.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(0, -70), new Vector2(-60, 70));
-        hud.statusText = CreateText("Status", top, "Point the camera at the marker.", 30, FontStyles.Normal, Color.white);
+        hud.statusText = CreateText("Status", top, "Point the camera at the marker.", 30, FontStyles.Normal, TextDark);
         Place(hud.statusText.rectTransform, new Vector2(0, 0), new Vector2(1, 1), new Vector2(0, -35), new Vector2(-80, -110));
         hud.statusText.enableAutoSizing = true;
         hud.statusText.fontSizeMin = 20;
@@ -443,7 +956,7 @@ public static class BMUARRSetup
         RectTransform card = CreatePanel("GuidanceCard", hudGO.transform, CardColor);
         AnchorTop(card, -270f, 220f, horizontalInset: 40f);
         hud.guidanceCard = card.gameObject;
-        hud.instructionText = CreateText("Instruction", card, "Continue straight", 50, FontStyles.Bold, Color.white);
+        hud.instructionText = CreateText("Instruction", card, "Continue straight", 50, FontStyles.Bold, TextDark);
         Place(hud.instructionText.rectTransform, new Vector2(0, 0.4f), new Vector2(1, 1), Vector2.zero, new Vector2(-50, -10));
         hud.instructionText.enableAutoSizing = true;
         hud.instructionText.fontSizeMin = 28;
@@ -505,7 +1018,7 @@ public static class BMUARRSetup
         // Dialogs
         RectTransform confirmCard = CreateDialog("ConfirmPanel", hudGO.transform, 520f, out GameObject confirmPanel);
         hud.confirmPanel = confirmPanel;
-        hud.confirmText = CreateText("Message", confirmCard, "Are you sure?", 34, FontStyles.Normal, Color.white);
+        hud.confirmText = CreateText("Message", confirmCard, "Are you sure?", 34, FontStyles.Normal, TextDark);
         Place(hud.confirmText.rectTransform, new Vector2(0, 0.45f), new Vector2(1, 1), Vector2.zero, new Vector2(-80, -60));
         hud.confirmYesButton = CreateButton("YesButton", confirmCard, "DISCARD", DangerColor, 30, out _);
         Place((RectTransform)hud.confirmYesButton.transform, new Vector2(0.06f, 0), new Vector2(0.48f, 0), new Vector2(0, 90), new Vector2(0, 110));
@@ -516,14 +1029,14 @@ public static class BMUARRSetup
         hud.resultPanel = resultPanel;
         hud.resultTitleText = CreateText("Title", resultCard, "Done", 48, FontStyles.Bold, AccentColor);
         Place(hud.resultTitleText.rectTransform, new Vector2(0, 1), new Vector2(1, 1), new Vector2(0, -80), new Vector2(-60, 90));
-        hud.resultBodyText = CreateText("Body", resultCard, "", 32, FontStyles.Normal, Color.white);
+        hud.resultBodyText = CreateText("Body", resultCard, "", 32, FontStyles.Normal, TextDark);
         Place(hud.resultBodyText.rectTransform, new Vector2(0, 0.3f), new Vector2(1, 1), new Vector2(0, -80), new Vector2(-80, -100));
         hud.resultButton = CreateButton("DoneButton", resultCard, "DONE", PrimaryColor, 34, out _);
         Place((RectTransform)hud.resultButton.transform, new Vector2(0.1f, 0), new Vector2(0.9f, 0), new Vector2(0, 90), new Vector2(0, 120));
 
         RectTransform errorCard = CreateDialog("ErrorPanel", hudGO.transform, 640f, out GameObject errorPanel);
         hud.errorPanel = errorPanel;
-        hud.errorText = CreateText("Message", errorCard, "", 32, FontStyles.Normal, Color.white);
+        hud.errorText = CreateText("Message", errorCard, "", 32, FontStyles.Normal, TextDark);
         Place(hud.errorText.rectTransform, new Vector2(0, 0.45f), new Vector2(1, 1), Vector2.zero, new Vector2(-80, -60));
         hud.errorActionButton = CreateButton("ActionButton", errorCard, "OPEN SETTINGS", PrimaryColor, 30, out hud.errorActionText);
         Place((RectTransform)hud.errorActionButton.transform, new Vector2(0.1f, 0), new Vector2(0.9f, 0), new Vector2(0, 210), new Vector2(0, 110));
@@ -549,7 +1062,7 @@ public static class BMUARRSetup
         message.fontSizeMin = 18;
         message.fontSizeMax = 30;
 
-        Button action = CreateButton("Action", banner, "OK", PrimaryColor, 26, out TMP_Text actionText);
+        Button action = CreateButton("Action", banner, "OK", Color.white, 26, out TMP_Text actionText);
         Place((RectTransform)action.transform, new Vector2(1, 0.5f), new Vector2(1, 0.5f), new Vector2(-120, 0), new Vector2(200, 90));
 
         var notifier = notifierGO.AddComponent<UINotifier>();
@@ -634,8 +1147,14 @@ public static class BMUARRSetup
         go.layer = UILayer;
         go.transform.SetParent(parent, false);
         var tmp = go.GetComponent<TextMeshProUGUI>();
-        var font = AssetDatabase.LoadAssetAtPath<TMP_FontAsset>(FontPath);
+
+        // Bold text (titles, buttons) uses the app's rounded display font, which is already heavy.
+        bool display = (style & FontStyles.Bold) != 0;
+        var font = display ? AssetDatabase.LoadAssetAtPath<TMP_FontAsset>(DisplayFontPath) : null;
+        if (font != null) style &= ~FontStyles.Bold;
+        else font = AssetDatabase.LoadAssetAtPath<TMP_FontAsset>(FontPath);
         if (font != null) tmp.font = font;
+
         tmp.text = text;
         tmp.fontSize = size;
         tmp.fontStyle = style;
@@ -657,7 +1176,16 @@ public static class BMUARRSetup
         colors.disabledColor = new Color(1f, 1f, 1f, 0.35f);
         button.colors = colors;
 
-        labelText = CreateText("Label", image.transform, label, fontSize, FontStyles.Bold, Color.white);
+        // Light buttons (mint, white) get green text and a mint outline, like the app's card buttons.
+        bool lightFill = color.grayscale > 0.6f;
+        if (lightFill)
+        {
+            var outline = image.gameObject.AddComponent<Outline>();
+            outline.effectColor = MintBorder;
+            outline.effectDistance = new Vector2(3f, -3f);
+        }
+
+        labelText = CreateText("Label", image.transform, label, fontSize, FontStyles.Bold, lightFill ? BrandGreenDark : Color.white);
         Stretch(labelText.rectTransform);
         labelText.enableAutoSizing = true;
         labelText.fontSizeMin = 16;
@@ -946,6 +1474,8 @@ public static class BMUARRSetup
     [MenuItem("Tools/BMU AR/Build Development APK (for testing)")]
     public static void BuildDevelopmentApk()
     {
+        // Dev builds use the release keystore too (so they update the installed app), so they need its passwords.
+        if (PlayerSettings.Android.useCustomKeystore && !CheckReleaseKeystore()) return;
         EditorUserBuildSettings.buildAppBundle = false;
         Build(Path.Combine("Builds", "BMUARR-dev.apk"), BuildOptions.Development);
     }

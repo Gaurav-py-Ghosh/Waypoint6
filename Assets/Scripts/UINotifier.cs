@@ -28,10 +28,11 @@ public class UINotifier : MonoBehaviour
     private Coroutine hideRoutine;
     private Action pendingAction;
 
-    private static readonly Color InfoColor = new Color(0.10f, 0.14f, 0.24f, 0.96f);
-    private static readonly Color SuccessColor = new Color(0.08f, 0.45f, 0.25f, 0.96f);
-    private static readonly Color WarningColor = new Color(0.62f, 0.42f, 0.05f, 0.96f);
-    private static readonly Color ErrorColor = new Color(0.62f, 0.12f, 0.12f, 0.96f);
+    // App theme greens for info/success; amber and red stay for problems.
+    private static readonly Color InfoColor = new Color32(0x00, 0xB8, 0x59, 0xF5);
+    private static readonly Color SuccessColor = new Color32(0x00, 0x8C, 0x44, 0xF5);
+    private static readonly Color WarningColor = new Color(0.92f, 0.62f, 0.10f, 0.97f);
+    private static readonly Color ErrorColor = new Color32(0xE5, 0x48, 0x4D, 0xF5);
 
     void Awake()
     {

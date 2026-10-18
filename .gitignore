@@ -73,3 +73,7 @@ desktop.ini
 # Signing keys must never be in the repo
 *.keystore
 *.jks
+
+# Google Maps API key (local only; see Assets/Scripts/MapsApiConfig.cs)
+/[Aa]ssets/Resources/MapsApiConfig.asset
+/[Aa]ssets/Resources/MapsApiConfig.asset.meta

@@ -42,6 +42,40 @@ public class GoogleAuthManager : MonoBehaviour
     /// <summary>True when Firebase already has a signed-in user from an earlier session.</summary>
     public bool HasSignedInUser => auth != null && auth.CurrentUser != null;
 
+    /// <summary>Loads the remembered Firebase user into UserSession. Returns false when nobody is signed in.</summary>
+    public bool RestoreSession()
+    {
+        if (!HasSignedInUser) return false;
+        UserSession.SetSignedIn(auth.CurrentUser.DisplayName, auth.CurrentUser.Email);
+        return true;
+    }
+
+    /// <summary>Signs out of Firebase and forgets the Google account, then shows the login screen.</summary>
+    public void SignOut()
+    {
+        if (auth != null) auth.SignOut();
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+        if (googleAuthBridge != null)
+        {
+            try
+            {
+                googleAuthBridge.CallStatic("signOut");
+            }
+            catch (System.Exception e)
+            {
+                AppLog.Warn(Tag, "Google bridge sign-out failed: " + e.Message);
+            }
+        }
+#endif
+
+        UserSession.Clear();
+        AppSession.OnboardingComplete = false;
+        if (signedInText != null) signedInText.gameObject.SetActive(false);
+        AppLog.Info(Tag, "Signed out.");
+        if (uiManager != null) uiManager.GoToLogin();
+    }
+
     private IEnumerator WaitForFirebase()
     {
         float deadline = Time.realtimeSinceStartup + FirebaseWaitSeconds;
@@ -145,12 +179,12 @@ public class GoogleAuthManager : MonoBehaviour
 
             SetBusy(false);
             FirebaseUser user = task.Result;
-            AppLog.Info(Tag, "Signed in.");
+            UserSession.SetSignedIn(user.DisplayName, user.Email);
 
-            string displayName = string.IsNullOrEmpty(user.DisplayName) ? "your Google account" : user.DisplayName;
             if (signedInText != null)
             {
-                signedInText.text = "Signed in as " + displayName;
+                string name = UserSession.FirstName ?? "your Google account";
+                signedInText.text = UserSession.IsAdmin ? $"Welcome, {name}! (Admin)" : $"Welcome, {name}!";
                 signedInText.gameObject.SetActive(true);
             }
             StartCoroutine(OpenMainPanelAfterLogin());

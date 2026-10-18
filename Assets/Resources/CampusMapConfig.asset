@@ -1,0 +1,46 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f4ca91f1f74166244a789c4aa3eaec1b, type: 3}
+  m_Name: CampusMapConfig
+  m_EditorClassIdentifier: Assembly-CSharp::CampusMapConfig
+  centerLatitude: 28.2479
+  centerLongitude: 76.8134
+  zoom: 17
+  mapSizePixels: 640
+  entrancePlaceId: Reception
+  onCampusRadiusMeters: 800
+  places:
+  - id: Library
+    displayName: Library
+    latitude: 28.246684
+    longitude: 76.814495
+    placed: 1
+  - id: Reception
+    displayName: Reception
+    latitude: 28.247239
+    longitude: 76.814434
+    placed: 1
+  - id: Grand Auditorium
+    displayName: Grand Auditorium
+    latitude: 28.24748598393818
+    longitude: 76.81404787416709
+    placed: 1
+  - id: Program Office
+    displayName: Program Office
+    latitude: 28.247535457469354
+    longitude: 76.81436405015543
+    placed: 1
+  - id: D Cafe
+    displayName: D'Cafe
+    latitude: 28.248251933382374
+    longitude: 76.81152110823511
+    placed: 1

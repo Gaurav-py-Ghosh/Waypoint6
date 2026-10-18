@@ -53,12 +53,13 @@ public class UIManager : MonoBehaviour
         }
         yield return null; // Let GoogleAuthManager pick up the Auth instance.
 
-        if (googleAuthManager != null && googleAuthManager.HasSignedInUser) GoToMain();
+        if (googleAuthManager != null && googleAuthManager.RestoreSession()) GoToMain();
         else GoToLogin();
     }
 
     public void GoToLogin()
     {
+        if (campusNavigationManager != null) campusNavigationManager.HideMenu();
         ShowOnly(loginScreen);
     }
 
@@ -70,6 +71,9 @@ public class UIManager : MonoBehaviour
     /// <summary>Called after successful login or skip. Hands off to CampusNavigationManager.</summary>
     public void GoToMain()
     {
+        // Skip Login and any other path that reaches Main without signing in means guest.
+        if (!UserSession.IsSignedIn && !UserSession.IsGuest) UserSession.SetGuest();
+
         AppSession.OnboardingComplete = true;
         ShowOnly(null);
 

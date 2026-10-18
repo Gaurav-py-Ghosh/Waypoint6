@@ -141,6 +141,11 @@ public class NavigationSceneController : MonoBehaviour
         {
             destination = AppSession.Destination;
             mode = AppSession.Mode;
+            if (mode == NavigationMode.Record && !UserSession.IsAdmin)
+            {
+                AppLog.Warn(Tag, "Non-admin tried to record; switching to guidance.");
+                mode = NavigationMode.Guide;
+            }
             return true;
         }
 

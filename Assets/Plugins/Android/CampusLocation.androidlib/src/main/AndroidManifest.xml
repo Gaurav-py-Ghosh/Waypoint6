@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Campus map: show the user's position and route from it. Asked for only when the map opens. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- The app still works without GPS (routes start at the main gate). -->
+    <uses-feature android:name="android.hardware.location.gps" android:required="false" />
+</manifest>
