@@ -1,10 +1,10 @@
 using UnityEngine;
 using UnityEngine.UI;
 
+/// <summary>First login screen: its one button opens the Google sign-in screen. Signing in is required.</summary>
 public class LoginScreen : MonoBehaviour
 {
     public Button loginButton;
-    public Button skipLoginButton;
 
     public UIManager uiManager;
 
@@ -13,11 +13,6 @@ public class LoginScreen : MonoBehaviour
         if (loginButton != null)
         {
             loginButton.onClick.AddListener(() => uiManager?.GoToMailVerify());
-        }
-
-        if (skipLoginButton != null)
-        {
-            skipLoginButton.onClick.AddListener(() => uiManager?.GoToMain());
         }
     }
 }

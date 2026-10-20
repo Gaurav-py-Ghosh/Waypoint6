@@ -18,7 +18,8 @@ service cloud.firestore {
           'gaurav.ghosh.23cse@bmu.edu.in',
           'vanshika.mehlawat.23cse@bmu.edu.in',
           'ayush.gupta.23cse@bmu.edu.in',
-          'shrey.jaiswal.23cse@bmu.edu.in'
+          'shrey.jaiswal.23cse@bmu.edu.in',
+          'tejaswini.yerrajodu.23cse@bmu.edu.in'
         ];
     }
 

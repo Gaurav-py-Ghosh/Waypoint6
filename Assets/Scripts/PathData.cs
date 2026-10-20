@@ -37,7 +37,8 @@ public class PathData
     /// The printed marker routes are measured from. Change it whenever the marker image
     /// changes, so routes recorded against the old marker are ignored instead of misplaced.
     /// </summary>
-    public const string CurrentMarkerId = "tree-pin-2026-10";
+    // "-b": the tree marker was briefly configured 17.6 cm wide instead of 20 cm; routes from then are scaled wrong.
+    public const string CurrentMarkerId = "tree-pin-2026-10-b";
 
     public int version;
     public string markerId;

@@ -185,6 +185,7 @@ public class AnchorTracker : MonoBehaviour
             PlaceOrigin(correctionTargetPosition, correctionTargetRotation);
             hasCorrectionTarget = false;
             AppLog.Info(Tag, $"Origin snapped back onto marker ({error:F2} m).");
+            SessionLog.Mark($"Origin snapped back onto marker ({error:F2} m).");
             OnOriginCorrected?.Invoke(error);
             return;
         }

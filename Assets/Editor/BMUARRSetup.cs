@@ -301,6 +301,10 @@ public static class BMUARRSetup
         if (tMain != null) navMgr.mainPanel = tMain.gameObject;
         if (tDest != null) navMgr.destinationPanel = tDest.gameObject;
 
+        // Menu screens start hidden: they sit above the splash in the canvas and would cover it.
+        if (tMain != null) tMain.gameObject.SetActive(false);
+        if (tDest != null) tDest.gameObject.SetActive(false);
+
         navMgr.locationPromptModal = BuildLocationPromptModal(tCanvas);
         AlignLoginButtons(tCanvas);
 
@@ -439,16 +443,27 @@ public static class BMUARRSetup
         badge.gameObject.SetActive(false);
     }
 
-    /// <summary>Gives the Google button on the second login screen the same layout as the first screen's buttons.</summary>
+    /// <summary>
+    /// Sign-in is required, so the Skip Login buttons are removed. The one remaining button
+    /// on each login screen is centred in the white card at the bottom of the background
+    /// (the card spans about 2–18% of the screen height).
+    /// </summary>
     private static void AlignLoginButtons(Transform canvas)
     {
-        var loginButton = canvas.Find("Login_Screen_Panel/LoginiwthID") as RectTransform;
-        var loginSkip = canvas.Find("Login_Screen_Panel/SkipLogin (1)") as RectTransform;
-        var googleButton = canvas.Find("Mail_Verification_Panel/Continue with Google") as RectTransform;
-        var mailSkip = canvas.Find("Mail_Verification_Panel/SkipLogin") as RectTransform;
+        foreach (string skip in new[] { "Login_Screen_Panel/SkipLogin (1)", "Mail_Verification_Panel/SkipLogin" })
+        {
+            Transform t = canvas.Find(skip);
+            if (t != null) Object.DestroyImmediate(t.gameObject);
+        }
 
+        var loginButton = canvas.Find("Login_Screen_Panel/LoginiwthID") as RectTransform;
+        var googleButton = canvas.Find("Mail_Verification_Panel/Continue with Google") as RectTransform;
+        if (loginButton != null)
+        {
+            loginButton.anchorMin = new Vector2(loginButton.anchorMin.x, 0.075f);
+            loginButton.anchorMax = new Vector2(loginButton.anchorMax.x, 0.125f);
+        }
         CopyLayout(loginButton, googleButton);
-        CopyLayout(loginSkip, mailSkip);
     }
 
     private static void CopyLayout(RectTransform from, RectTransform to)
@@ -875,6 +890,19 @@ public static class BMUARRSetup
     private static void ReportMarkerSize(ImageTargetBehaviour target)
     {
         var so = new SerializedObject(target);
+
+        // Keep the printed size fixed and the aspect matching the image. Vuforia caches the
+        // aspect when the texture is imported, so a re-import can silently make the marker square.
+        var markerTexture = so.FindProperty("mRuntimeTexture")?.objectReferenceValue as Texture2D;
+        if (markerTexture != null && so.FindProperty("mAspectRatio") != null)
+        {
+            float aspect = markerTexture.height / (float)Mathf.Max(1, markerTexture.width);
+            so.FindProperty("mAspectRatio").floatValue = aspect;
+            so.FindProperty("mWidth").floatValue = MarkerWidthMeters;
+            so.FindProperty("mHeight").floatValue = MarkerWidthMeters * aspect;
+            so.ApplyModifiedPropertiesWithoutUndo();
+        }
+
         SerializedProperty width = so.FindProperty("mWidth");
         if (width != null)
         {

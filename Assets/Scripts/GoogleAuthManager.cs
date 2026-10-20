@@ -197,11 +197,6 @@ public class GoogleAuthManager : MonoBehaviour
         if (uiManager != null) uiManager.GoToMain();
     }
 
-    public void SkipLogin()
-    {
-        if (uiManager != null) uiManager.GoToMain();
-    }
-
     private void Fail(string logMessage, string userMessage)
     {
         SetBusy(false);

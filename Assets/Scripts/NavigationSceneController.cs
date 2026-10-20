@@ -39,6 +39,7 @@ public class NavigationSceneController : MonoBehaviour
     private string destination;
     private bool leaving;
     private bool finished;
+    private int previousFrameRate = -1;
     private float nextHudRefresh;
 
     private bool pointerDown;
@@ -68,7 +69,12 @@ public class NavigationSceneController : MonoBehaviour
     {
         Screen.sleepTimeout = SleepTimeout.NeverSleep;
 
+        // The camera delivers 30 fps; rendering faster only adds heat and CPU load.
+        previousFrameRate = Application.targetFrameRate;
+        Application.targetFrameRate = 30;
+
         if (!ResolveSession()) return;
+        SessionLog.Mark($"AR scene started ({mode}).");
 
         hud.OnPrimary += HandlePrimary;
         hud.OnSecondary += HandleBack;
@@ -92,6 +98,7 @@ public class NavigationSceneController : MonoBehaviour
     void OnDestroy()
     {
         Screen.sleepTimeout = SleepTimeout.SystemSetting;
+        Application.targetFrameRate = previousFrameRate;
 
         if (VuforiaApplication.Instance != null)
         {
@@ -170,6 +177,11 @@ public class NavigationSceneController : MonoBehaviour
         hud.SetArrowVisible(false);
         hud.SetSecondary("CANCEL");
         recorder.Begin(destination);
+        if (recorder.RestoredPointCount > 0)
+        {
+            UINotifier.Show($"Resumed your unfinished recording ({recorder.RestoredPointCount} points). Scan the marker to continue.",
+                NoticeKind.Info, 6f);
+        }
         RefreshRecordingHud();
     }
 
@@ -362,6 +374,7 @@ public class NavigationSceneController : MonoBehaviour
 
         if (recorder != null) recorder.Cancel();
         if (guidance != null) guidance.Stop();
+        SessionLog.Mark("AR scene left normally.");
         AppSession.ReturnToMenu();
     }
 

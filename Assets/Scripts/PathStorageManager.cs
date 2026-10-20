@@ -52,6 +52,48 @@ public static class PathStorageManager
         return routes;
     }
 
+    // ───────── Unfinished recording, kept so a crash does not lose the walk ─────────
+
+    private static string DraftPath => Path.Combine(DirectoryPath, "draft.recording");
+
+    public static void SaveDraft(PathData draft)
+    {
+        try
+        {
+            string tempPath = DraftPath + ".tmp";
+            File.WriteAllText(tempPath, draft.ToJson());
+            if (File.Exists(DraftPath)) File.Delete(DraftPath);
+            File.Move(tempPath, DraftPath);
+        }
+        catch (Exception e)
+        {
+            AppLog.Warn(Tag, "Could not save recording draft: " + e.Message);
+        }
+    }
+
+    /// <summary>The unfinished recording for this destination, or null.</summary>
+    public static PathData LoadDraft(string destinationName)
+    {
+        try
+        {
+            if (!File.Exists(DraftPath)) return null;
+            PathData draft = PathData.FromJson(File.ReadAllText(DraftPath));
+            if (draft == null || draft.version != PathData.CurrentVersion || draft.markerId != PathData.CurrentMarkerId) return null;
+            return RouteKey(draft.destinationName) == RouteKey(destinationName) ? draft : null;
+        }
+        catch (Exception e)
+        {
+            AppLog.Warn(Tag, "Could not read recording draft: " + e.Message);
+            return null;
+        }
+    }
+
+    public static void ClearDraft()
+    {
+        try { if (File.Exists(DraftPath)) File.Delete(DraftPath); }
+        catch (Exception e) { AppLog.Warn(Tag, "Could not delete recording draft: " + e.Message); }
+    }
+
     // ───────── Routes recorded on this phone that still need uploading ─────────
 
     public static List<string> GetPendingUploads()

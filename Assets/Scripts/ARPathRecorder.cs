@@ -85,7 +85,38 @@ public class ARPathRecorder : MonoBehaviour
         if (pathRenderer != null) pathRenderer.ClearAll();
         if (floorEstimator != null) floorEstimator.ResetEstimate();
 
-        SetState(anchorTracker != null && anchorTracker.IsCalibrated ? RecorderState.Ready : RecorderState.WaitingForMarker);
+        // Resume a recording that was cut short (crash, app killed). Points are relative
+        // to the marker, so they line up again once the marker is scanned.
+        PathData draft = PathStorageManager.LoadDraft(destination);
+        if (draft != null && draft.points != null)
+        {
+            points.AddRange(draft.GetPoints2D());
+            RecordedDistance = PathMath.Length(points);
+        }
+        RestoredPointCount = points.Count;
+        if (RestoredPointCount == 0) PathStorageManager.ClearDraft();
+
+        SetState(anchorTracker != null && anchorTracker.IsCalibrated ? ReadyState : RecorderState.WaitingForMarker);
+    }
+
+    /// <summary>Points recovered from an unfinished recording when Begin was called.</summary>
+    public int RestoredPointCount { get; private set; }
+
+    private RecorderState ReadyState => points.Count > 0 ? RecorderState.Recording : RecorderState.Ready;
+
+    private void SaveDraft()
+    {
+        if (points.Count == 0)
+        {
+            PathStorageManager.ClearDraft();
+            return;
+        }
+        var draft = new PathData(Destination, anchorTracker != null ? anchorTracker.Mount : MarkerMount.Floor)
+        {
+            floorHeight = CurrentFloorY
+        };
+        draft.SetPoints(points);
+        PathStorageManager.SaveDraft(draft);
     }
 
     /// <summary>Places a point where the centre of the screen meets the floor.</summary>
@@ -117,6 +148,7 @@ public class ARPathRecorder : MonoBehaviour
 
         points.RemoveAt(points.Count - 1);
         RecordedDistance = PathMath.Length(points);
+        SaveDraft();
         if (points.Count == 0) SetState(RecorderState.Ready);
         else OnStateChanged?.Invoke();
         return true;
@@ -154,14 +186,17 @@ public class ARPathRecorder : MonoBehaviour
         }
 
         AppLog.Info(Tag, $"Saved '{Destination}': {data.totalDistanceMeters:F1} m, {points.Count} points.");
+        PathStorageManager.ClearDraft();
         points.Clear();
         HasAim = false;
         SetState(RecorderState.Idle);
         return data;
     }
 
+    /// <summary>Stops recording and discards the unfinished route, including its draft.</summary>
     public void Cancel()
     {
+        PathStorageManager.ClearDraft();
         points.Clear();
         RecordedDistance = 0f;
         HasAim = false;
@@ -209,7 +244,9 @@ public class ARPathRecorder : MonoBehaviour
 
         points.Add(point);
         RecordedDistance = PathMath.Length(points);
+        SaveDraft();
         AppLog.Info(Tag, $"Point {points.Count} placed ({RecordedDistance:F1} m).");
+        SessionLog.Mark($"Point {points.Count} placed ({RecordedDistance:F1} m).");
 
         if (State == RecorderState.Ready) SetState(RecorderState.Recording);
         else OnStateChanged?.Invoke();
@@ -246,7 +283,7 @@ public class ARPathRecorder : MonoBehaviour
 
     private void HandleCalibrated()
     {
-        if (State == RecorderState.WaitingForMarker) SetState(RecorderState.Ready);
+        if (State == RecorderState.WaitingForMarker) SetState(ReadyState);
     }
 
     private void SetState(RecorderState state)
