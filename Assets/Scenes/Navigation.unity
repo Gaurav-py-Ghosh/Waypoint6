@@ -214,14 +214,14 @@ MonoBehaviour:
   PreviewVisible: 1
   RuntimeOcclusion: 0
   RuntimeCollider: 0
-  mTrackableName: Image_target
+  mTrackableName: image_target_tree
   mInitializedInEditor: 1
   mDataSetPath: 
   mAspectRatio: 1
   mImageTargetType: 3
-  mWidth: 0.2
-  mHeight: 0.2
-  mRuntimeTexture: {fileID: 2800000, guid: 8f49d21c3b7a5e840a1c93e4f62a1b90, type: 3}
+  mWidth: 0.17598534
+  mHeight: 0.17598534
+  mRuntimeTexture: {fileID: 2800000, guid: 701053479f5d4e54586c0a87f10171e7, type: 3}
   mMotionHint: 1
   mTrackingOptimization: 0
   mTrackingOptimizationNeedsUpgrade: 0
@@ -240,7 +240,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   mObserverBehaviour: {fileID: 31871753}
   mHiddenRoot: {fileID: 0}
-  mTargetName: Image_target
+  mTargetName: image_target_tree
   mDatasetName: 
   mCastedBehaviour: {fileID: 31871753}
   mMeshFilter: {fileID: 0}

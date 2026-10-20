@@ -13,7 +13,7 @@ PlayerSettings:
   useOnDemandResources: 0
   accelerometerFrequency: 60
   companyName: DefaultCompany
-  productName: BMUARR
+  productName: Waypoint
   defaultCursor: {fileID: 0}
   cursorHotspot: {x: 0, y: 0}
   m_SplashScreenBackgroundColor: {r: 0.13725491, g: 0.12156863, b: 0.1254902, a: 1}
@@ -149,7 +149,7 @@ PlayerSettings:
   loadStoreDebugModeEnabled: 0
   visionOSBundleVersion: 1.0
   tvOSBundleVersion: 1.0
-  bundleVersion: 1.2.0
+  bundleVersion: 1.3.2
   preloadedAssets: []
   metroInputSource: 0
   wsaTransparentSwapchain: 0
@@ -180,7 +180,7 @@ PlayerSettings:
     iPhone: 0
     tvOS: 0
   overrideDefaultApplicationIdentifier: 1
-  AndroidBundleVersionCode: 3
+  AndroidBundleVersionCode: 6
   AndroidMinSdkVersion: 30
   AndroidTargetSdkVersion: 0
   AndroidPreferredInstallLocation: 1
@@ -305,7 +305,7 @@ PlayerSettings:
   - m_BuildTarget: 
     m_Icons:
     - serializedVersion: 2
-      m_Icon: {fileID: 2800000, guid: bf68d7b73efdf0a4da5dc9a123d78d9f, type: 3}
+      m_Icon: {fileID: 2800000, guid: 19edd2968f70ede448b78c1639a1704e, type: 3}
       m_Width: 128
       m_Height: 128
       m_Kind: 0
@@ -409,32 +409,44 @@ PlayerSettings:
       m_SubKind: App Store
   - m_BuildTarget: Android
     m_Icons:
-    - m_Textures: []
+    - m_Textures:
+      - {fileID: 2800000, guid: 3fbde884a80db7947b69c5d36bee513f, type: 3}
+      - {fileID: 2800000, guid: 43e41459275f0c347bfca2bd4fb2b2b2, type: 3}
       m_Width: 432
       m_Height: 432
       m_Kind: 2
       m_SubKind: 
-    - m_Textures: []
+    - m_Textures:
+      - {fileID: 2800000, guid: 3fbde884a80db7947b69c5d36bee513f, type: 3}
+      - {fileID: 2800000, guid: 43e41459275f0c347bfca2bd4fb2b2b2, type: 3}
       m_Width: 324
       m_Height: 324
       m_Kind: 2
       m_SubKind: 
-    - m_Textures: []
+    - m_Textures:
+      - {fileID: 2800000, guid: 3fbde884a80db7947b69c5d36bee513f, type: 3}
+      - {fileID: 2800000, guid: 43e41459275f0c347bfca2bd4fb2b2b2, type: 3}
       m_Width: 216
       m_Height: 216
       m_Kind: 2
       m_SubKind: 
-    - m_Textures: []
+    - m_Textures:
+      - {fileID: 2800000, guid: 3fbde884a80db7947b69c5d36bee513f, type: 3}
+      - {fileID: 2800000, guid: 43e41459275f0c347bfca2bd4fb2b2b2, type: 3}
       m_Width: 162
       m_Height: 162
       m_Kind: 2
       m_SubKind: 
-    - m_Textures: []
+    - m_Textures:
+      - {fileID: 2800000, guid: 3fbde884a80db7947b69c5d36bee513f, type: 3}
+      - {fileID: 2800000, guid: 43e41459275f0c347bfca2bd4fb2b2b2, type: 3}
       m_Width: 108
       m_Height: 108
       m_Kind: 2
       m_SubKind: 
-    - m_Textures: []
+    - m_Textures:
+      - {fileID: 2800000, guid: 3fbde884a80db7947b69c5d36bee513f, type: 3}
+      - {fileID: 2800000, guid: 43e41459275f0c347bfca2bd4fb2b2b2, type: 3}
       m_Width: 81
       m_Height: 81
       m_Kind: 2

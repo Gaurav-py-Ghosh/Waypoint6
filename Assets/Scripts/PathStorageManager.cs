@@ -111,7 +111,7 @@ public static class PathStorageManager
             PathData data = PathData.FromJson(File.ReadAllText(filePath));
             if (data == null || !data.IsValid)
             {
-                AppLog.Warn(Tag, $"Route for '{destinationName}' is from an older app version or damaged; it must be recorded again.");
+                AppLog.Warn(Tag, $"Route for '{destinationName}' is from an older app version or marker, or damaged; it must be recorded again.");
                 return null;
             }
             return data;

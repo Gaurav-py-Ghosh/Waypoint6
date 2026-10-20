@@ -33,7 +33,14 @@ public class PathData
     /// </summary>
     public const int CurrentVersion = 2;
 
+    /// <summary>
+    /// The printed marker routes are measured from. Change it whenever the marker image
+    /// changes, so routes recorded against the old marker are ignored instead of misplaced.
+    /// </summary>
+    public const string CurrentMarkerId = "tree-pin-2026-10";
+
     public int version;
+    public string markerId;
     public string destinationName;
     public string createdUtc;
 
@@ -51,6 +58,7 @@ public class PathData
     public PathData(string destination, MarkerMount mount)
     {
         version = CurrentVersion;
+        markerId = CurrentMarkerId;
         destinationName = destination;
         createdUtc = DateTime.UtcNow.ToString("o");
         markerMount = mount.ToString();
@@ -59,6 +67,7 @@ public class PathData
 
     public bool IsValid =>
         version == CurrentVersion &&
+        markerId == CurrentMarkerId &&
         !string.IsNullOrEmpty(destinationName) &&
         points != null && points.Count >= 2;
 

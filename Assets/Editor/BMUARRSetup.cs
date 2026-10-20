@@ -33,7 +33,7 @@ public static class BMUARRSetup
     private const string MarkerMaterialPath = MaterialsFolder + "/RouteMarker.mat";
     private const string GeneratedUIFolder = "Assets/UI/Generated";
     private const string ArrowSpritePath = GeneratedUIFolder + "/NavArrow.png";
-    private const string TargetImagePath = "Assets/UI/ImageTargets/Image_target.jpeg";
+    private const string TargetImagePath = "Assets/UI/ImageTargets/image_target_tree.png";
     private const string FontPath = "Assets/TextMesh Pro/Resources/Fonts & Materials/LiberationSans SDF.asset";
     // Rounded display font used by the app's button artwork; used for titles and buttons.
     private const string DisplayFontPath = "Assets/Fonts/PoetsenOne-Regular SDF.asset";
@@ -879,6 +879,13 @@ public static class BMUARRSetup
         if (width != null)
         {
             Debug.Log($"BMU AR: Marker width is set to {width.floatValue * 100f:F0} cm. The printed marker must be exactly this wide, or route distances will be scaled wrong.");
+        }
+
+        // Vuforia rejects runtime image targets over 2048 px on either side, and the marker then never detects.
+        var texture = so.FindProperty("mRuntimeTexture")?.objectReferenceValue as Texture2D;
+        if (texture != null && Mathf.Max(texture.width, texture.height) > 2048)
+        {
+            Debug.LogError($"BMU AR: Marker image is {texture.width}x{texture.height}. Vuforia allows at most 2048 px per side; lower Max Size in its import settings.");
         }
     }
 
