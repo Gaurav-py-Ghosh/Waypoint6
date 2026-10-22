@@ -10,6 +10,15 @@ public enum GuidanceStatus
     Arrived
 }
 
+public enum WrongWayKind
+{
+    /// <summary>Walking away from the route's direction.</summary>
+    WrongDirection,
+
+    /// <summary>Walking far from the route, whatever the direction.</summary>
+    Drifted
+}
+
 /// <summary>
 /// Snapshot of guidance for the HUD.
 /// </summary>
@@ -19,9 +28,6 @@ public struct GuidanceUpdate
     public float remainingMeters;
     public float totalMeters;
     public string instruction;
-
-    /// <summary>Angle (degrees) from the camera's heading to the way forward. Positive is to the right.</summary>
-    public float directionAngle;
 }
 
 /// <summary>
@@ -54,12 +60,35 @@ public class GuidanceController : MonoBehaviour
     [Tooltip("Redraw the remaining route after moving this far along it (metres).")]
     [SerializeField] private float redrawDistance = 0.75f;
 
+    [Header("Wrong way")]
+    [Tooltip("Walking this far gives one sample of the walking direction (metres). Standing still gives none.")]
+    [SerializeField] private float headingSampleDistance = 1.5f;
+
+    [Tooltip("Walking direction at least this far from the route's direction is the wrong way (degrees).")]
+    [SerializeField] private float wrongWayAngle = 60f;
+
+    [Tooltip("Seconds of walking the wrong way before it is reported.")]
+    [SerializeField] private float wrongWayDelay = 3f;
+
+    [Tooltip("Walking this far from the route is reported whatever the direction (metres).")]
+    [SerializeField] private float driftDistance = 8f;
+
+    [Tooltip("Faster than this (m/s) is a tracking jump, not walking.")]
+    [SerializeField] private float maxWalkingSpeed = 4f;
+
     public event Action<GuidanceUpdate> OnGuidanceUpdated;
+    public event Action OnStarted;
     public event Action OnArrived;
+    public event Action<WrongWayKind> OnWrongWay;
+    public event Action OnBackOnRoute;
 
     public bool IsActive => route != null;
     public string Destination => route != null ? route.destinationName : null;
     public float TotalDistance => route != null ? route.totalDistanceMeters : 0f;
+    public float Progress => progress;
+    public IReadOnlyList<PathTurn> Turns => turns;
+    public float TurnNowDistance => turnNowDistance;
+    public bool IsWrongWay => wrongWay;
 
     private PathData route;
     private List<Vector2> points;
@@ -71,6 +100,12 @@ public class GuidanceController : MonoBehaviour
     private float lastDrawnProgress = float.NegativeInfinity;
     private float offRouteSince = -1f;
     private float nextUpdateTime;
+
+    private bool wrongWay;
+    private float wrongHeadingSince = -1f;
+    private bool hasHeadingSample;
+    private Vector2 headingSample;
+    private float headingSampleTime;
 
     void Awake()
     {
@@ -105,6 +140,9 @@ public class GuidanceController : MonoBehaviour
         progress = 0f;
         lastDrawnProgress = float.NegativeInfinity;
         offRouteSince = -1f;
+        wrongWay = false;
+        wrongHeadingSince = -1f;
+        hasHeadingSample = false;
         status = GuidanceStatus.WaitingForMarker;
         if (floorEstimator != null) floorEstimator.ResetEstimate();
         if (pathRenderer != null) pathRenderer.ClearAll();
@@ -127,7 +165,7 @@ public class GuidanceController : MonoBehaviour
         if (Time.time < nextUpdateTime) return;
         nextUpdateTime = Time.time + 1f / Mathf.Max(1f, updateRate);
 
-        if (!TryGetUserPosition(out Vector2 position, out Vector2 facing)) return;
+        if (!TryGetUserPosition(out Vector2 position)) return;
 
         // Prefer the stretch of route near the last known progress, so routes that
         // pass close to themselves do not make progress jump.
@@ -141,6 +179,7 @@ public class GuidanceController : MonoBehaviour
 
         progress = projection.distanceAlong;
         UpdateOffRoute(projection.lateralDistance);
+        UpdateWrongWay(position, projection);
 
         float remaining = Mathf.Max(0f, route.totalDistanceMeters - progress);
         float toEnd = Vector2.Distance(position, points[points.Count - 1]);
@@ -152,12 +191,7 @@ public class GuidanceController : MonoBehaviour
 
         if (Mathf.Abs(progress - lastDrawnProgress) >= redrawDistance) DrawRemaining();
 
-        GuidanceUpdate update = BuildUpdate(remaining);
-        Vector2 target = status == GuidanceStatus.OffRoute
-            ? projection.closestPoint
-            : PathMath.PointAt(points, cumulative, progress + lookAheadDistance);
-        update.directionAngle = PathMath.SignedTurnAngle(facing, target - position);
-        Publish(update);
+        Publish(BuildUpdate(remaining));
     }
 
     private void HandleCalibrated()
@@ -167,6 +201,7 @@ public class GuidanceController : MonoBehaviour
         status = GuidanceStatus.OnRoute;
         nextUpdateTime = 0f;
         DrawRemaining();
+        OnStarted?.Invoke();
         Publish(BuildUpdate(route.totalDistanceMeters));
     }
 
@@ -193,9 +228,74 @@ public class GuidanceController : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// Stricter than off route: only walking clearly away from the route, or very
+    /// far from it, counts. Uses the direction actually walked, not where the
+    /// phone points, so looking around never triggers it.
+    /// </summary>
+    private void UpdateWrongWay(Vector2 position, PathProjection projection)
+    {
+        if (!hasHeadingSample)
+        {
+            hasHeadingSample = true;
+            headingSample = position;
+            headingSampleTime = Time.time;
+            return;
+        }
+
+        Vector2 walked = position - headingSample;
+        float walkedDistance = walked.magnitude;
+        if (walkedDistance < headingSampleDistance) return;
+
+        float speed = walkedDistance / Mathf.Max(0.01f, Time.time - headingSampleTime);
+        headingSample = position;
+        headingSampleTime = Time.time;
+        if (speed > maxWalkingSpeed) return;
+
+        Vector2 routeDirection = PathMath.PointAt(points, cumulative, projection.distanceAlong + lookAheadDistance) - projection.closestPoint;
+        bool wrongHeading = routeDirection.sqrMagnitude > 1e-4f && Vector2.Angle(walked, routeDirection) >= wrongWayAngle;
+
+        if (wrongWay)
+        {
+            if (!wrongHeading && projection.lateralDistance <= offRouteDistance)
+            {
+                wrongWay = false;
+                wrongHeadingSince = -1f;
+                OnBackOnRoute?.Invoke();
+            }
+            return;
+        }
+
+        if (projection.lateralDistance >= driftDistance)
+        {
+            StartWrongWay(WrongWayKind.Drifted);
+        }
+        else if (!wrongHeading)
+        {
+            wrongHeadingSince = -1f;
+        }
+        else if (wrongHeadingSince < 0f)
+        {
+            wrongHeadingSince = Time.time;
+        }
+        else if (Time.time - wrongHeadingSince >= wrongWayDelay)
+        {
+            StartWrongWay(WrongWayKind.WrongDirection);
+        }
+    }
+
+    private void StartWrongWay(WrongWayKind kind)
+    {
+        wrongWay = true;
+        wrongHeadingSince = -1f;
+        AppLog.Info(Tag, $"Wrong way: {kind}.");
+        OnWrongWay?.Invoke(kind);
+    }
+
     private void Arrive()
     {
         status = GuidanceStatus.Arrived;
+        wrongWay = false;
         progress = route.totalDistanceMeters;
         DrawRemaining();
         Publish(BuildUpdate(0f));
@@ -259,31 +359,19 @@ public class GuidanceController : MonoBehaviour
             if (distance < -0.5f) continue;
 
             string side = turn.IsRight ? "right" : "left";
-            string kind = turn.IsSlight ? $"Bear {side}" : $"Turn {side}";
+            string kind = turn.IsSlight ? $"Slight {side}" : $"Turn {side}";
             return distance <= turnNowDistance ? $"{kind} now" : $"{kind} in {Mathf.RoundToInt(distance)} m";
         }
         return remaining <= 10f ? $"Destination ahead, {Mathf.RoundToInt(remaining)} m" : "Continue straight";
     }
 
-    private bool TryGetUserPosition(out Vector2 position, out Vector2 facing)
+    private bool TryGetUserPosition(out Vector2 position)
     {
         position = Vector2.zero;
-        facing = Vector2.up;
         if (arCamera == null || anchorTracker == null || !anchorTracker.IsCalibrated) return false;
 
-        Transform origin = anchorTracker.StabilizedOrigin;
-        Vector3 local = origin.InverseTransformPoint(arCamera.position);
-        Vector3 forward = origin.InverseTransformDirection(arCamera.forward);
+        Vector3 local = anchorTracker.StabilizedOrigin.InverseTransformPoint(arCamera.position);
         position = new Vector2(local.x, local.z);
-
-        var flat = new Vector2(forward.x, forward.z);
-        // Phone pointed straight down: fall back to the phone's top edge.
-        if (flat.sqrMagnitude < 0.01f)
-        {
-            Vector3 up = origin.InverseTransformDirection(arCamera.up);
-            flat = new Vector2(up.x, up.z);
-        }
-        if (flat.sqrMagnitude > 1e-6f) facing = flat.normalized;
         return true;
     }
 

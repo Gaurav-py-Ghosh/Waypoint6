@@ -17,7 +17,6 @@ public class NavigationHUD : MonoBehaviour
     public GameObject guidanceCard;
     public TMP_Text instructionText;
     public TMP_Text distanceText;
-    public RectTransform directionArrow;
 
     [Header("Tracking Banner")]
     public GameObject trackingBanner;
@@ -79,7 +78,6 @@ public class NavigationHUD : MonoBehaviour
         SetActive(errorPanel, false);
         SetActive(trackingBanner, false);
         SetActive(guidanceCard, false);
-        SetArrowVisible(false);
         SetRecordingControls(false, false, false);
     }
 
@@ -107,17 +105,6 @@ public class NavigationHUD : MonoBehaviour
     {
         SetText(instructionText, instruction);
         SetText(distanceText, distance);
-    }
-
-    public void SetArrowVisible(bool visible)
-    {
-        if (directionArrow != null) directionArrow.gameObject.SetActive(visible);
-    }
-
-    /// <param name="angle">Degrees; positive points to the right.</param>
-    public void SetArrowAngle(float angle)
-    {
-        if (directionArrow != null) directionArrow.localRotation = Quaternion.Euler(0f, 0f, -angle);
     }
 
     public void SetTrackingBanner(string message)
