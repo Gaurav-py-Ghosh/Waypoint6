@@ -32,8 +32,8 @@ public static class BMUARRSetup
     private const string RouteMaterialPath = MaterialsFolder + "/RouteRibbon.mat";
     private const string MarkerMaterialPath = MaterialsFolder + "/RouteMarker.mat";
     private const string GeneratedUIFolder = "Assets/UI/Generated";
-    private const string ArrowSpritePath = GeneratedUIFolder + "/NavArrow.png";
-    private const string TargetImagePath = "Assets/UI/ImageTargets/image_target_tree.png";
+    private const string VoiceClipsFolder = "Assets/Audio/Voice";
+    private const string TargetImagePath ="Assets/UI/ImageTargets/image_target_tree.png";
     private const string FontPath = "Assets/TextMesh Pro/Resources/Fonts & Materials/LiberationSans SDF.asset";
     // Rounded display font used by the app's button artwork; used for titles and buttons.
     private const string DisplayFontPath = "Assets/Fonts/PoetsenOne-Regular SDF.asset";
@@ -85,7 +85,6 @@ public static class BMUARRSetup
 
         Material routeMaterial = EnsureMaterial(RouteMaterialPath, transparent: true, doubleSided: true);
         Material markerMaterial = EnsureMaterial(MarkerMaterialPath, transparent: false, doubleSided: false);
-        Sprite arrowSprite = EnsureArrowSprite();
 
         Scene menu = EditorSceneManager.OpenScene(menuPath, OpenSceneMode.Single);
         bool navExists = File.Exists(NavigationScenePath);
@@ -96,7 +95,7 @@ public static class BMUARRSetup
         MoveVuforiaObjects(menu, nav);
 
         SceneManager.SetActiveScene(nav);
-        BuildNavigationScene(nav, routeMaterial, markerMaterial, arrowSprite);
+        BuildNavigationScene(nav, routeMaterial, markerMaterial);
 
         SceneManager.SetActiveScene(menu);
         BuildMenuScene(menu);
@@ -173,7 +172,7 @@ public static class BMUARRSetup
         }
     }
 
-    private static void BuildNavigationScene(Scene nav, Material routeMaterial, Material markerMaterial, Sprite arrowSprite)
+    private static void BuildNavigationScene(Scene nav, Material routeMaterial, Material markerMaterial)
     {
         // Remove what an earlier run generated.
         foreach (string name in new[] { "NavigationSystems", "NavigationCanvas", "EventSystem", "Calibrated_World_Origin", "WaypointManager" })
@@ -247,6 +246,10 @@ public static class BMUARRSetup
         guidance.pathRenderer = renderer;
         guidance.floorEstimator = floor;
 
+        var voice = systems.AddComponent<VoiceGuide>();
+        voice.guidance = guidance;
+        voice.clips = LoadVoiceClips();
+
         var controller = systems.AddComponent<NavigationSceneController>();
         controller.anchorTracker = anchorTracker;
         controller.recorder = recorder;
@@ -257,7 +260,7 @@ public static class BMUARRSetup
         // UI
         CreateEventSystem();
         Transform safeArea = CreateCanvas("NavigationCanvas", sortingOrder: 10);
-        controller.hud = BuildNavigationHUD(safeArea, arrowSprite);
+        controller.hud = BuildNavigationHUD(safeArea);
         CreateNotifier(safeArea);
     }
 
@@ -968,7 +971,7 @@ public static class BMUARRSetup
 
     // ───────────────────────── HUD ─────────────────────────
 
-    private static NavigationHUD BuildNavigationHUD(Transform parent, Sprite arrowSprite)
+    private static NavigationHUD BuildNavigationHUD(Transform parent)
     {
         var hudGO = new GameObject("NavigationHUD", typeof(RectTransform));
         hudGO.layer = UILayer;
@@ -998,18 +1001,6 @@ public static class BMUARRSetup
         hud.instructionText.fontSizeMax = 50;
         hud.distanceText = CreateText("Distance", card, "0 m left", 34, FontStyles.Normal, AccentColor);
         Place(hud.distanceText.rectTransform, new Vector2(0, 0), new Vector2(1, 0.4f), Vector2.zero, new Vector2(-50, 0));
-
-        // Direction arrow
-        var arrowRoot = new GameObject("DirectionArrow", typeof(RectTransform));
-        arrowRoot.layer = UILayer;
-        arrowRoot.transform.SetParent(hudGO.transform, false);
-        var arrowRt = arrowRoot.GetComponent<RectTransform>();
-        arrowRt.anchorMin = arrowRt.anchorMax = new Vector2(0.5f, 0.62f);
-        arrowRt.sizeDelta = new Vector2(220, 220);
-        var arrowImage = CreateImage("Arrow", arrowRoot.transform, AccentColor, arrowSprite, sliced: false);
-        Stretch(arrowImage.rectTransform);
-        arrowImage.raycastTarget = false;
-        hud.directionArrow = arrowRt;
 
         // Aiming crosshair (recording): where DROP POINT places a point.
         TMP_Text crosshair = CreateText("Crosshair", hudGO.transform, "+", 110, FontStyles.Normal, new Color(1f, 1f, 1f, 0.85f));
@@ -1302,6 +1293,16 @@ public static class BMUARRSetup
 
     // ───────────────────────── Assets ─────────────────────────
 
+    private static List<AudioClip> LoadVoiceClips()
+    {
+        List<AudioClip> clips = AssetDatabase.FindAssets("t:AudioClip", new[] { VoiceClipsFolder })
+            .Select(guid => AssetDatabase.LoadAssetAtPath<AudioClip>(AssetDatabase.GUIDToAssetPath(guid)))
+            .Where(clip => clip != null)
+            .ToList();
+        if (clips.Count == 0) Debug.LogWarning($"BMU AR: No voice clips in {VoiceClipsFolder}; navigation will be silent.");
+        return clips;
+    }
+
     private static Material EnsureMaterial(string path, bool transparent, bool doubleSided)
     {
         var material = AssetDatabase.LoadAssetAtPath<Material>(path);
@@ -1319,62 +1320,6 @@ public static class BMUARRSetup
         ARPathRenderer.ConfigureUnlit(material, transparent, doubleSided);
         AssetDatabase.CreateAsset(material, path);
         return material;
-    }
-
-    /// <summary>Draws a clean, high-resolution arrow sprite (pointing up) and imports it.</summary>
-    private static Sprite EnsureArrowSprite()
-    {
-        var existing = AssetDatabase.LoadAssetAtPath<Sprite>(ArrowSpritePath);
-        if (existing != null) return existing;
-
-        if (!AssetDatabase.IsValidFolder("Assets/UI")) AssetDatabase.CreateFolder("Assets", "UI");
-        if (!AssetDatabase.IsValidFolder(GeneratedUIFolder)) AssetDatabase.CreateFolder("Assets/UI", "Generated");
-
-        const int size = 256;
-        const int supersample = 4;
-        Vector2[] polygon =
-        {
-            new Vector2(0.50f, 0.96f), // tip
-            new Vector2(0.90f, 0.52f),
-            new Vector2(0.64f, 0.52f),
-            new Vector2(0.64f, 0.06f),
-            new Vector2(0.36f, 0.06f),
-            new Vector2(0.36f, 0.52f),
-            new Vector2(0.10f, 0.52f)
-        };
-
-        var tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
-        var pixels = new Color32[size * size];
-        for (int y = 0; y < size; y++)
-        {
-            for (int x = 0; x < size; x++)
-            {
-                int inside = 0;
-                for (int sy = 0; sy < supersample; sy++)
-                for (int sx = 0; sx < supersample; sx++)
-                {
-                    var p = new Vector2((x + (sx + 0.5f) / supersample) / size, (y + (sy + 0.5f) / supersample) / size);
-                    if (PointInPolygon(p, polygon)) inside++;
-                }
-                byte alpha = (byte)(255 * inside / (supersample * supersample));
-                pixels[y * size + x] = new Color32(255, 255, 255, alpha);
-            }
-        }
-        tex.SetPixels32(pixels);
-        tex.Apply();
-
-        File.WriteAllBytes(ArrowSpritePath, tex.EncodeToPNG());
-        Object.DestroyImmediate(tex);
-        AssetDatabase.ImportAsset(ArrowSpritePath, ImportAssetOptions.ForceUpdate);
-
-        var importer = (TextureImporter)AssetImporter.GetAtPath(ArrowSpritePath);
-        importer.textureType = TextureImporterType.Sprite;
-        importer.spriteImportMode = SpriteImportMode.Single;
-        importer.alphaIsTransparency = true;
-        importer.mipmapEnabled = false;
-        importer.SaveAndReimport();
-
-        return AssetDatabase.LoadAssetAtPath<Sprite>(ArrowSpritePath);
     }
 
     private static bool PointInPolygon(Vector2 p, Vector2[] polygon)

@@ -174,7 +174,6 @@ public class NavigationSceneController : MonoBehaviour
     {
         hud.SetTitle($"RECORDING: {destination.ToUpperInvariant()}");
         hud.SetGuidanceVisible(false);
-        hud.SetArrowVisible(false);
         hud.SetSecondary("CANCEL");
         recorder.Begin(destination);
         if (recorder.RestoredPointCount > 0)
@@ -337,10 +336,6 @@ public class NavigationSceneController : MonoBehaviour
         string distance = update.status == GuidanceStatus.Arrived ? "" : $"{Mathf.CeilToInt(update.remainingMeters)} m left";
         hud.SetInstruction(update.instruction, distance);
 
-        bool showArrow = update.status == GuidanceStatus.OnRoute || update.status == GuidanceStatus.OffRoute;
-        hud.SetArrowVisible(showArrow);
-        if (showArrow) hud.SetArrowAngle(update.directionAngle);
-
         if (update.status != GuidanceStatus.WaitingForMarker)
         {
             hud.SetStatus(update.status == GuidanceStatus.OffRoute
@@ -352,7 +347,6 @@ public class NavigationSceneController : MonoBehaviour
     private void HandleArrived()
     {
         finished = true;
-        hud.SetArrowVisible(false);
         hud.ShowResult("You have arrived", destination, Leave);
     }
 
